@@ -31,6 +31,14 @@ const respond = (res, data) => {
 
 const getBaseUrl = (req) => `${req.hostname == 'localhost' ? 'http' : 'https'}://${req.hostname}`;
 
+// Prevent Stremio (and any CDN) from caching a response — used for the TorBox catalog/meta so
+// deletes and new downloads show up immediately instead of a stale cached list.
+const noCache = (res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+};
+
 // URL of a generated fallback poster (cleaned title + year) for an item without real artwork.
 const generatedPosterUrl = (req, name) => {
   const {title, year} = meta.parseTitleFromName(name);
@@ -174,6 +182,7 @@ app.get("/:userConfig?/manifest.json", async(req, res) => {
 
 // Catalog: list the user's TorBox downloads as Stremio meta previews.
 app.get("/:userConfig/catalog/:type/:id.json", async(req, res) => {
+  noCache(res);
   try {
     const userConfig = JSON.parse(atob(req.params.userConfig));
     if(userConfig.debridId !== 'torbox' || req.params.id !== 'torbox-downloads'){
@@ -203,6 +212,7 @@ app.get("/:userConfig/catalog/:type/:id.json", async(req, res) => {
 
 // Meta: detail page for a single TorBox download (id: torbox:<torrentId>).
 app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
+  noCache(res);
   try {
     const userConfig = JSON.parse(atob(req.params.userConfig));
     if(userConfig.debridId !== 'torbox' || !req.params.id.startsWith('torbox:')){
