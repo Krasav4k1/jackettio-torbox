@@ -201,6 +201,8 @@ app.get("/:userConfig?/manifest.json", async(req, res) => {
         {type: "movie", id: "torbox-downloads", name: "TorBox Downloads"},
         {type: "movie", id: "latest-4k", name: "Latest added 4k (3d)"},
         {type: "movie", id: "latest-4k-1w", name: "Latest added 4k (1w)"},
+        // Paginated (Stremio skip) date-sorted "latest 4k", 20 grouped items per page.
+        {type: "movie", id: "latest-4k-paged", name: "Latest Added 4k", extra: [{name: "skip"}], extraSupported: ["skip"]},
         // Search-only catalog: appears when the user searches in Stremio, runs a Jackett search.
         {
           type: "movie",
@@ -291,6 +293,79 @@ async function buildJackettMetas(req, {query, recentDays, sortKey}){
   return metas;
 }
 
+const PAGE_SIZE = 20;
+const POOL_MAX = 300; // Jackett items to pull (paginated) before grouping
+
+// Fetch up to maxItems from Jackett using its offset pagination.
+async function fetchJackettPool(query, maxItems){
+  const pageSize = 100;
+  const all = [];
+  for(let offset = 0; offset < maxItems; offset += pageSize){
+    const page = await searchTorrents({query, limit: pageSize, offset});
+    if(!page.length)break;
+    all.push(...page);
+    if(page.length < pageSize)break; // last page
+  }
+  return all;
+}
+
+// Build the grouped, newest-first list for the paginated catalog ONCE (grouping happens before
+// paging, so a title never splits across pages), then cache the ordered list of light groups.
+async function getPagedGroupList(query){
+  const cacheKey = `jackettio:pagedgroups:${query}`;
+  let list = await cache.get(cacheKey);
+  if(list)return list;
+
+  const pool = await fetchJackettPool(query, POOL_MAX);
+  const resolvable = pool.filter(item => item.link || item.magneturl || item.infoHash);
+  const seen = new Set();
+  const groups = new Map();
+  for(const item of resolvable){
+    const dedupeKey = itemInfoHash(item) || item.id;
+    if(seen.has(dedupeKey))continue;
+    seen.add(dedupeKey);
+    const {title, year} = meta.parseTitleFromName(item.name);
+    const key = `${title.toLowerCase()}|${year || ''}`;
+    if(!groups.has(key))groups.set(key, {title: title || item.name, sample: item.name, newest: 0, items: []});
+    const g = groups.get(key);
+    g.items.push({id: item.id, link: item.link, magneturl: item.magneturl || '', infoHash: itemInfoHash(item), name: item.name, size: item.size, type: item.type});
+    g.newest = Math.max(g.newest, item.pubDate || 0);
+  }
+
+  list = [...groups.values()];
+  for(const g of list)g.items.sort((a, b) => b.size - a.size);
+  list.sort((a, b) => b.newest - a.newest); // newest first
+  console.log(`latest-4k-paged: ${pool.length} pool items -> ${list.length} groups`);
+
+  await cache.set(cacheKey, list, {ttl: 3600});
+  return list;
+}
+
+// One page (20 grouped items) of the paginated catalog. Artwork/imdb is resolved per page only.
+async function buildLatestPage(req, query, skip){
+  const list = await getPagedGroupList(query);
+  const pageGroups = list.slice(skip, skip + PAGE_SIZE);
+  const limit = pLimit(5);
+  return Promise.all(pageGroups.map(g => limit(async () => {
+    const info = await meta.searchInfo(g.sample).catch(() => ({poster: null, imdbId: null, name: null}));
+    for(const item of g.items){
+      await cache.set(`jackettio:torrent:${item.id}`, item, {ttl: 3 * 24 * 3600});
+    }
+    const groupId = info.imdbId || g.items[0].id;
+    const name = info.name || g.title;
+    await cache.set(`jackettio:group:${groupId}`, {name, imdbId: info.imdbId, poster: info.poster, ids: g.items.map(i => i.id)}, {ttl: 3 * 24 * 3600});
+    return {
+      id: `jackettio:${groupId}`,
+      type: 'movie',
+      name,
+      poster: info.poster || generatedPosterUrl(req, name),
+      posterShape: 'poster',
+      ...(info.imdbId ? {imdb_id: info.imdbId} : {}),
+      description: `${g.items.length} source${g.items.length > 1 ? 's' : ''}`
+    };
+  })));
+}
+
 // Catalog: TorBox downloads, and a Jackett "latest 4k" search. Metas get a best-effort poster
 // lookup (cached) with bounded concurrency to stay responsive.
 app.get("/:userConfig/catalog/:type/:id.json", async(req, res) => {
@@ -327,6 +402,12 @@ app.get("/:userConfig/catalog/:type/:id.json", async(req, res) => {
       return respond(res, {metas});
     }
 
+    if(req.params.id === 'latest-4k-paged'){
+      // First page of the paginated, grouped, date-sorted "4k" catalog.
+      const metas = await buildLatestPage(req, '4k', 0);
+      return respond(res, {metas});
+    }
+
     return respond(res, {metas: []});
   }catch(err){
     console.log('catalog', err);
@@ -334,19 +415,31 @@ app.get("/:userConfig/catalog/:type/:id.json", async(req, res) => {
   }
 });
 
-// Search catalog: Stremio calls this with an ".../:id/search=<query>.json" extra segment.
+// Catalog extra segment: search (".../:id/search=<query>.json") and pagination
+// (".../:id/skip=<n>.json") both arrive here.
 app.get("/:userConfig/catalog/:type/:id/:extra.json", async(req, res) => {
   noCache(res);
   try {
     const userConfig = Object.assign(JSON.parse(atob(req.params.userConfig)), {ip: req.clientIp});
-    const query = (new URLSearchParams(req.params.extra).get('search') || '').trim();
-    if(userConfig.debridId !== 'torbox' || req.params.id !== 'jackettio-search' || !query){
+    if(userConfig.debridId !== 'torbox'){
       return respond(res, {metas: []});
     }
-    const metas = await buildJackettMetas(req, {query, recentDays: 0, sortKey: 'size'});
-    return respond(res, {metas});
+    const params = new URLSearchParams(req.params.extra);
+
+    if(req.params.id === 'jackettio-search'){
+      const query = (params.get('search') || '').trim();
+      if(!query)return respond(res, {metas: []});
+      return respond(res, {metas: await buildJackettMetas(req, {query, recentDays: 0, sortKey: 'size'})});
+    }
+
+    if(req.params.id === 'latest-4k-paged'){
+      const skip = Math.max(0, parseInt(params.get('skip') || '0') || 0);
+      return respond(res, {metas: await buildLatestPage(req, '4k', skip)});
+    }
+
+    return respond(res, {metas: []});
   }catch(err){
-    console.log('search catalog', err);
+    console.log('catalog extra', err);
     return respond(res, {metas: []});
   }
 });

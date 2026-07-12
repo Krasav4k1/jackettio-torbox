@@ -86,16 +86,19 @@ export async function searchEpisodeTorrents({indexer, name, year, season, episod
 
 }
 
-export async function searchTorrents({indexer, query}){
+export async function searchTorrents({indexer, query, limit, offset}){
 
   indexer = indexer || 'all';
-  const cacheKey = `jackettItems:2:search:${indexer}:${query}`;
+  const cacheKey = `jackettItems:3:search:${indexer}:${query}:${limit || ''}:${offset || ''}`;
   let items = await cache.get(cacheKey);
 
   if(!items){
+    const params = {t: 'search', q: query};
+    if(limit)params.limit = limit;
+    if(offset)params.offset = offset;
     const res = await jackettApi(
       `/api/v2.0/indexers/${indexer}/results/torznab/api`,
-      {t: 'search', q: query}
+      params
     );
     items = res?.rss?.channel?.item || [];
     cache.set(cacheKey, items, {ttl: items.length > 0 ? 3600 : 60});
