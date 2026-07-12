@@ -250,6 +250,15 @@ app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
           url: `${getBaseUrl(req)}/${req.params.userConfig}/torbox/play/${tId}/${fId}/${encodeURIComponent(file.name)}`
         };
       });
+      if(details){
+        // Action stream: playing it permanently deletes this download from TorBox. Stremio will
+        // fail to play the 204 response — that's expected; the deletion is the point.
+        streams.push({
+          name: `🗑️ ${config.addonName}`,
+          title: `Delete this download from TorBox`,
+          url: `${getBaseUrl(req)}/${req.params.userConfig}/torbox/delete/${torrentId}/${encodeURIComponent(details.name)}`
+        });
+      }
       return respond(res, {streams});
     }
 
@@ -326,6 +335,27 @@ app.use('/:userConfig/torbox/play/:torrentId/:fileId/:name?', async(req, res, ne
 
   }
 
+});
+
+// Delete a TorBox download. Wired as a catalog item's "Delete" stream: playing it removes the
+// download. Only an actual GET (play) deletes — a HEAD probe is a no-op — and Stremio simply
+// can't play the 204, which is fine.
+app.get('/:userConfig/torbox/delete/:torrentId/:name?', async(req, res) => {
+  if(req.method === 'HEAD'){
+    return res.status(204).end();
+  }
+  try {
+    const userConfig = Object.assign(JSON.parse(atob(req.params.userConfig)), {ip: req.clientIp});
+    if(userConfig.debridId !== 'torbox'){
+      throw new Error('Not a TorBox configuration');
+    }
+    const debridInstance = debrid.instance(userConfig);
+    await debridInstance.deleteTorrent(req.params.torrentId);
+    return res.status(204).end();
+  }catch(err){
+    console.log('torbox delete', err);
+    return res.status(500).end();
+  }
 });
 
 app.use('/:userConfig/download/:type/:id/:torrentId/:name?', async(req, res, next) => {

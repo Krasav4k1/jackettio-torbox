@@ -108,6 +108,13 @@ export default class TorBox {
     return createHash('md5').update(this.#apiKey).digest('hex');
   }
 
+  // Permanently delete a download from the user's TorBox account.
+  async deleteTorrent(torrentId){
+    const body = JSON.stringify({torrent_id: parseInt(torrentId), operation: 'delete'});
+    await this.#request('POST', '/torrents/controltorrent', {body, headers: {'content-type': 'application/json'}});
+    return true;
+  }
+
   // Catalog: list the user's completed downloads that contain at least one video file.
   // Newest first. Used to source the "TorBox Downloads" Stremio catalog.
   async getCatalogItems(){
