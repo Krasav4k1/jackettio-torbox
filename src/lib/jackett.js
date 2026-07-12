@@ -157,7 +157,8 @@ async function jackettApi(path, query){
 function normalizeItems(items){
   return forceArray(items).map(item => {
     item = mergeDollarKeys(item);
-    const attr = item['torznab:attr'].reduce((obj, item) => {
+    // A single torznab:attr comes through as an object, not an array — normalize it.
+    const attr = forceArray(item['torznab:attr'] || []).reduce((obj, item) => {
       obj[item.name] = item.value;
       return obj;
     }, {});

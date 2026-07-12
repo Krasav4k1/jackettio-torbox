@@ -110,7 +110,15 @@ export default class TorBox {
 
   // Add a magnet and resolve the largest video file to a playable link (used by search catalogs).
   async getMagnetDownload(magnet, infoHash){
-    const files = await this.getFilesFromMagnet(magnet, infoHash);
+    return this.#largestVideoDownload(await this.getFilesFromMagnet(magnet, infoHash));
+  }
+
+  // Same, from a .torrent file buffer (private indexers that only expose a download link).
+  async getBufferDownload(buffer, infoHash){
+    return this.#largestVideoDownload(await this.getFilesFromBuffer(buffer, infoHash));
+  }
+
+  async #largestVideoDownload(files){
     const videos = files.filter(file => isVideo(file.name));
     const best = (videos.length ? videos : files).sort((a, b) => b.size - a.size)[0];
     if(!best)throw new Error(ERROR.NOT_READY);

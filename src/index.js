@@ -12,7 +12,7 @@ import * as icon from './lib/icon.js';
 import * as debrid from './lib/debrid.js';
 import {getIndexers, searchTorrents} from './lib/jackett.js';
 import * as jackettio from "./lib/jackettio.js";
-import {cleanTorrentFolder, createTorrentFolder} from './lib/torrentInfos.js';
+import {cleanTorrentFolder, createTorrentFolder, get as getTorrentInfos, getTorrentFile} from './lib/torrentInfos.js';
 import {bytesToSize} from './lib/util.js';
 import {generatePoster} from './lib/poster.js';
 import pLimit from 'p-limit';
@@ -214,31 +214,38 @@ app.get("/:userConfig/catalog/:type/:id.json", async(req, res) => {
 
     if(req.params.id === 'latest-4k'){
       // Jackett search "4k", keep items published in the last 3 days, sort by size desc, dedupe.
+      // Items are keyed by Jackett's own id (not infohash) so private indexers — which usually
+      // expose only a .torrent download link, no infohash/magnet — are supported too.
       const cutoff = Date.now() - 3 * 24 * 3600 * 1000;
-      const raw = (await searchTorrents({query: '4k'})).map(item => ({...item, infoHash: itemInfoHash(item)}));
-      const withHash = raw.filter(item => item.infoHash);
-      const withDate = withHash.filter(item => item.pubDate > 0);
-      const sorted = withHash
+      const raw = await searchTorrents({query: '4k'});
+      const resolvable = raw.filter(item => item.link || item.magneturl || item.infoHash);
+      const withDate = resolvable.filter(item => item.pubDate > 0);
+      const sorted = resolvable
         .filter(item => item.pubDate >= cutoff)
         .sort((a, b) => b.size - a.size);
-      console.log(`latest-4k: ${raw.length} results, ${withHash.length} with infohash, ${withDate.length} with a pubDate, ${sorted.length} within last 3 days`);
+      console.log(`latest-4k: ${raw.length} results, ${resolvable.length} resolvable, ${withDate.length} with a pubDate, ${sorted.length} within last 3 days`);
       const seen = new Set();
       const torrents = [];
       for(const item of sorted){
-        if(seen.has(item.infoHash))continue;
-        seen.add(item.infoHash);
+        const key = itemInfoHash(item) || item.id;
+        if(seen.has(key))continue;
+        seen.add(key);
         torrents.push(item);
         if(torrents.length >= 50)break;
       }
       const metas = await Promise.all(torrents.map(item => limit(async () => {
-        // Stash the magnet so meta/stream can resolve the item without re-searching Jackett.
-        await cache.set(`jackettio:torrent:${item.infoHash}`, {
+        // Stash everything the resolver needs so meta/stream work without re-searching Jackett.
+        await cache.set(`jackettio:torrent:${item.id}`, {
+          id: item.id,
+          link: item.link,
+          magneturl: item.magneturl || '',
+          infoHash: item.infoHash || '',
           name: item.name,
           size: item.size,
-          magnet: item.magneturl || `magnet:?xt=urn:btih:${item.infoHash}`
+          type: item.type
         }, {ttl: 3 * 24 * 3600});
         return {
-          id: `jackettio:${item.infoHash}`,
+          id: `jackettio:${item.id}`,
           type: 'movie',
           name: item.name,
           poster: (await meta.searchPoster(item.name).catch(() => null)) || generatedPosterUrl(req, item.name),
@@ -284,8 +291,8 @@ app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
     }
 
     if(req.params.id.startsWith('jackettio:')){
-      const infoHash = req.params.id.split(':')[1];
-      const info = await cache.get(`jackettio:torrent:${infoHash}`);
+      const jackettId = req.params.id.split(':')[1];
+      const info = await cache.get(`jackettio:torrent:${jackettId}`);
       if(!info){
         return respond(res, {meta: {}});
       }
@@ -338,14 +345,14 @@ app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
       return respond(res, {streams});
     }
 
-    // Jackett search-catalog item: resolve the magnet through TorBox at play time.
+    // Jackett search-catalog item: resolve it through TorBox at play time.
     if(req.params.id.startsWith('jackettio:')){
-      const infoHash = req.params.id.split(':')[1];
-      const info = await cache.get(`jackettio:torrent:${infoHash}`) || {name: infoHash, size: 0};
+      const jackettId = req.params.id.split(':')[1];
+      const info = await cache.get(`jackettio:torrent:${jackettId}`) || {name: jackettId, size: 0};
       return respond(res, {streams: [{
         name: `[TB] ${config.addonName}`,
         title: `${info.name}\n${bytesToSize(info.size)}`,
-        url: `${getBaseUrl(req)}/${req.params.userConfig}/torbox/magnet/${infoHash}/${encodeURIComponent(info.name)}`
+        url: `${getBaseUrl(req)}/${req.params.userConfig}/torbox/resolve/${jackettId}/${encodeURIComponent(info.name)}`
       }]});
     }
 
@@ -377,9 +384,10 @@ app.get("/stream/:type/:id.json", async(req, res) => {
 
 });
 
-// Resolve a Jackett search-catalog item: add its magnet to TorBox and play the largest video
-// file. Uncached torrents surface as NOT_READY (TorBox starts fetching) until ready, like /download.
-app.use('/:userConfig/torbox/magnet/:infoHash/:name?', async(req, res, next) => {
+// Resolve a Jackett search-catalog item: add it to TorBox (magnet, or a .torrent downloaded from
+// the indexer link for private trackers) and play the largest video file. Uncached torrents
+// surface as NOT_READY (TorBox starts fetching) until ready, like /download.
+app.use('/:userConfig/torbox/resolve/:id/:name?', async(req, res, next) => {
 
   if (req.method !== 'GET' && req.method !== 'HEAD'){
     return next();
@@ -389,9 +397,25 @@ app.use('/:userConfig/torbox/magnet/:infoHash/:name?', async(req, res, next) => 
 
     const userConfig = Object.assign(JSON.parse(atob(req.params.userConfig)), {ip: req.clientIp});
     const debridInstance = debrid.instance(userConfig);
-    const info = await cache.get(`jackettio:torrent:${req.params.infoHash}`);
-    const magnet = (info && info.magnet) || `magnet:?xt=urn:btih:${req.params.infoHash}`;
-    const url = await debridInstance.getMagnetDownload(magnet, req.params.infoHash);
+    const raw = await cache.get(`jackettio:torrent:${req.params.id}`);
+    if(!raw){
+      throw new Error('Torrent info expired — reopen the catalog');
+    }
+    let url;
+    if(raw.magneturl){
+      // Public indexer: resolve straight from the magnet.
+      url = await debridInstance.getMagnetDownload(raw.magneturl, raw.infoHash);
+    }else{
+      // Private indexer (no magnet): download + parse the .torrent from the indexer link,
+      // then upload it to TorBox (or use the magnet if parsing yields a public one).
+      const infos = await getTorrentInfos({link: raw.link, id: raw.id, name: raw.name, size: raw.size, infoHash: raw.infoHash, type: raw.type});
+      if(infos.magnetUrl){
+        url = await debridInstance.getMagnetDownload(infos.magnetUrl, infos.infoHash);
+      }else{
+        const buffer = await getTorrentFile(infos);
+        url = await debridInstance.getBufferDownload(buffer, infos.infoHash);
+      }
+    }
 
     res.status(302);
     res.set('location', url);
@@ -399,7 +423,7 @@ app.use('/:userConfig/torbox/magnet/:infoHash/:name?', async(req, res, next) => 
 
   }catch(err){
 
-    console.log('torbox magnet', req.params.infoHash, err.message || err);
+    console.log('torbox resolve', req.params.id, err.message || err);
 
     switch(err.message){
       case debrid.ERROR.NOT_READY:
