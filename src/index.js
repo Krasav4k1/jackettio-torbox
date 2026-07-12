@@ -14,6 +14,7 @@ import {getIndexers} from './lib/jackett.js';
 import * as jackettio from "./lib/jackettio.js";
 import {cleanTorrentFolder, createTorrentFolder} from './lib/torrentInfos.js';
 import {bytesToSize} from './lib/util.js';
+import {generatePoster} from './lib/poster.js';
 import pLimit from 'p-limit';
 
 const converter = new showdown.Converter();
@@ -29,6 +30,14 @@ const respond = (res, data) => {
 };
 
 const getBaseUrl = (req) => `${req.hostname == 'localhost' ? 'http' : 'https'}://${req.hostname}`;
+
+// URL of a generated fallback poster (cleaned title + year) for an item without real artwork.
+const generatedPosterUrl = (req, name) => {
+  const {title, year} = meta.parseTitleFromName(name);
+  const query = new URLSearchParams({title: title || name});
+  if(year)query.set('tag', `${year}`);
+  return `${getBaseUrl(req)}/poster.png?${query.toString()}`;
+};
 
 const limiter = rateLimit({
   windowMs: config.rateLimitWindow * 1000,
@@ -73,6 +82,23 @@ app.get('/icon', async (req, res) => {
   res.contentType(path.basename(filePath));
   res.setHeader('Cache-Control', `public, max-age=${3600}`);
   return res.sendFile(filePath);
+});
+
+// Generated fallback poster: a title-on-color image for catalog items without real artwork.
+app.get('/poster.png', async (req, res) => {
+  try {
+    const title = `${req.query.title || 'Unknown'}`.slice(0, 120);
+    const subtitle = req.query.tag ? `${req.query.tag}`.slice(0, 40) : '';
+    const buffer = await generatePoster(title, subtitle);
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
+    return res.send(buffer);
+  }catch(err){
+    console.log('poster', err);
+    res.status(302);
+    res.set('location', '/icon');
+    return res.send('');
+  }
 });
 
 app.use((req, res, next) => {
@@ -155,7 +181,6 @@ app.get("/:userConfig/catalog/:type/:id.json", async(req, res) => {
     }
     const debridInstance = debrid.instance(Object.assign(userConfig, {ip: req.clientIp}));
     const items = await debridInstance.getCatalogItems();
-    const placeholder = `${getBaseUrl(req)}/icon`;
     // Best-effort poster lookup per item (cached), bounded concurrency to stay responsive.
     const limit = pLimit(5);
     const metas = await Promise.all(items.map(item => limit(async () => {
@@ -164,8 +189,8 @@ app.get("/:userConfig/catalog/:type/:id.json", async(req, res) => {
         id: `torbox:${item.id}`,
         type: 'movie',
         name: item.name,
-        poster: poster || placeholder,
-        posterShape: poster ? 'poster' : 'square',
+        poster: poster || generatedPosterUrl(req, item.name),
+        posterShape: 'poster',
         description: `TorBox download — ${bytesToSize(item.size)}`
       };
     })));
@@ -190,13 +215,14 @@ app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
       return respond(res, {meta: {}});
     }
     const poster = await meta.searchPoster(details.name).catch(() => null);
+    const posterUrl = poster || generatedPosterUrl(req, details.name);
     const metaItem = {
       id: req.params.id,
       type: 'movie',
       name: details.name,
-      poster: poster || `${getBaseUrl(req)}/icon`,
-      posterShape: poster ? 'poster' : 'square',
-      background: poster || undefined,
+      poster: posterUrl,
+      posterShape: 'poster',
+      background: posterUrl,
       description: details.files.map(file => `${file.name} — ${bytesToSize(file.size)}`).join('\n')
     };
     return respond(res, {meta: metaItem});

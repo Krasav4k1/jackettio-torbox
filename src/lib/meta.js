@@ -46,16 +46,26 @@ export async function searchPoster(name){
 
   let poster = null;
   try {
-    for(const type of ['movie', 'series']){
-      const metas = await promiseTimeout(searchCinemeta(type, title), 3000).catch(() => []);
-      let match = metas[0];
-      if(year){
-        const byYear = metas.find(m => `${m.releaseInfo || ''}`.startsWith(`${year}`));
-        if(byYear)match = byYear;
-      }
-      if(match && match.poster){
-        poster = match.poster;
-        break;
+    // Prefer TMDB when a token is configured (better search), then fall back to Cinemeta.
+    if(config.tmdbAccessToken){
+      poster = await promiseTimeout(searchTmdb(title, year), 3000).catch(() => null);
+    }
+    if(!poster){
+      // Try the full title, then progressively drop trailing words (junk that survived parsing).
+      outer:
+      for(const query of titleQueries(title)){
+        for(const type of ['movie', 'series']){
+          const metas = await promiseTimeout(searchCinemeta(type, query), 3000).catch(() => []);
+          let match = metas[0];
+          if(year){
+            const byYear = metas.find(m => `${m.releaseInfo || ''}`.startsWith(`${year}`));
+            if(byYear)match = byYear;
+          }
+          if(match && match.poster){
+            poster = match.poster;
+            break outer;
+          }
+        }
       }
     }
   }catch(err){
@@ -66,10 +76,35 @@ export async function searchPoster(name){
   return poster;
 }
 
+// Full title, then shrinking prefixes (down to 2 words) to survive trailing junk in names.
+function titleQueries(title){
+  const words = title.split(' ').filter(Boolean);
+  const queries = [title];
+  for(let n = words.length - 1; n >= 2; n--){
+    queries.push(words.slice(0, n).join(' '));
+  }
+  return [...new Set(queries)];
+}
+
 async function searchCinemeta(type, query){
   const url = `https://v3-cinemeta.strem.io/catalog/${type}/top/search=${encodeURIComponent(query)}.json`;
   const res = await fetch(url, {headers: {accept: 'application/json'}});
   if(!res.ok)return [];
   const data = await res.json();
   return data.metas || [];
+}
+
+async function searchTmdb(query, year){
+  const url = `https://api.themoviedb.org/3/search/multi?query=${encodeURIComponent(query)}${year ? `&year=${year}` : ''}`;
+  const res = await fetch(url, {headers: {accept: 'application/json', authorization: `Bearer ${config.tmdbAccessToken}`}});
+  if(!res.ok)return null;
+  const data = await res.json();
+  const results = (data.results || []).filter(r => r.poster_path && (r.media_type === 'movie' || r.media_type === 'tv'));
+  if(!results.length)return null;
+  let match = results[0];
+  if(year){
+    const byYear = results.find(r => `${r.release_date || r.first_air_date || ''}`.startsWith(`${year}`));
+    if(byYear)match = byYear;
+  }
+  return `https://image.tmdb.org/t/p/w500${match.poster_path}`;
 }
