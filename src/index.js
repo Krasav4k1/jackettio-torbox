@@ -347,11 +347,19 @@ app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
 
     // Jackett search-catalog item: resolve it through TorBox at play time.
     if(req.params.id.startsWith('jackettio:')){
+      const userConfig = Object.assign(JSON.parse(atob(req.params.userConfig)), {ip: req.clientIp});
       const jackettId = req.params.id.split(':')[1];
       const info = await cache.get(`jackettio:torrent:${jackettId}`) || {name: jackettId, size: 0};
+      // Mark whether the torrent is cached on TorBox (+) and whether it's already in the account.
+      const status = info.infoHash
+        ? await debrid.instance(userConfig).getHashStatus(info.infoHash).catch(() => ({cached: false, inAccount: false}))
+        : {cached: false, inAccount: false};
+      const rows = [info.name];
+      if(status.inAccount)rows.push('📁 Your media');
+      rows.push(bytesToSize(info.size));
       return respond(res, {streams: [{
-        name: `[TB] ${config.addonName}`,
-        title: `${info.name}\n${bytesToSize(info.size)}`,
+        name: `[TB${status.cached ? '+' : ''}] ${config.addonName}`,
+        title: rows.join('\n'),
         url: `${getBaseUrl(req)}/${req.params.userConfig}/torbox/resolve/${jackettId}/${encodeURIComponent(info.name)}`
       }]});
     }

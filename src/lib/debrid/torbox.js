@@ -146,6 +146,23 @@ export default class TorBox {
       }));
   }
 
+  // For a search-catalog item: is the hash instantly cached on TorBox, and is it already in the
+  // user's account? Both checks run in parallel and degrade to false on error.
+  async getHashStatus(infoHash){
+    if(!infoHash)return {cached: false, inAccount: false};
+    const hash = infoHash.toLowerCase();
+    const [cached, inAccount] = await Promise.all([
+      this.#request('POST', '/torrents/checkcached', {
+        body: JSON.stringify({hashes: [hash]}),
+        headers: {'content-type': 'application/json'},
+        query: {format: 'object', list_files: 'false'}
+      }).then(res => Object.keys(res.data || {}).some(key => key.toLowerCase() === hash)).catch(() => false),
+      this.#request('GET', '/torrents/mylist', {query: {bypass_cache: 'true'}})
+        .then(res => (res.data || []).some(torrent => `${torrent.hash || ''}`.toLowerCase() === hash)).catch(() => false)
+    ]);
+    return {cached, inAccount};
+  }
+
   // Catalog: return a single download's name and its video files (for meta + stream lists).
   async getTorrentDetails(torrentId){
     const torrent = await this.#getTorrent(torrentId);
