@@ -13,7 +13,7 @@ import * as debrid from './lib/debrid.js';
 import {getIndexers, searchTorrents} from './lib/jackett.js';
 import * as jackettio from "./lib/jackettio.js";
 import {cleanTorrentFolder, createTorrentFolder, get as getTorrentInfos, getTorrentFile} from './lib/torrentInfos.js';
-import {bytesToSize} from './lib/util.js';
+import {bytesToSize, promiseTimeout, wait} from './lib/util.js';
 import {generatePoster, generatePosterSvg} from './lib/poster.js';
 import pLimit from 'p-limit';
 
@@ -68,6 +68,27 @@ async function artworkFor(req, name){
 async function singleAsGroup(id){
   const info = await cache.get(`jackettio:torrent:${id}`);
   return info ? {name: info.name, imdbId: null, poster: null, ids: [id]} : null;
+}
+
+// Gentle, GLOBALLY-throttled resolution of a private source's infohash from its .torrent link, so
+// the cached badge can show on first open without bursting the tracker (Cloudflare 1015). Runs one
+// download at a time with a short gap between them; result is '' on failure.
+const HASH_RESOLVE_GAP = 600;
+const HASH_RESOLVE_PER_GROUP = 5;
+const hashResolveLimit = pLimit(1);
+let lastHashResolveAt = 0;
+async function resolveInfoHash(info){
+  return hashResolveLimit(async () => {
+    const waitMs = Math.max(0, lastHashResolveAt + HASH_RESOLVE_GAP - Date.now());
+    if(waitMs)await wait(waitMs);
+    lastHashResolveAt = Date.now();
+    try {
+      const parsed = await promiseTimeout(getTorrentInfos({link: info.link, id: info.id, name: info.name, size: info.size, infoHash: info.infoHash, type: info.type}), 6000);
+      return (parsed && parsed.infoHash) || '';
+    }catch(err){
+      return '';
+    }
+  });
 }
 
 const limiter = rateLimit({
@@ -536,14 +557,22 @@ app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
         return respond(res, {streams: []});
       }
       const debridInstance = debrid.instance(userConfig);
-      // Use only hashes we already know (from the magnet, or resolved+persisted on a previous
-      // play). We deliberately DON'T download .torrent files here just for the cached badge —
-      // that hammers private trackers' download endpoints (rate limits / Cloudflare 1015). For a
-      // link-only source the badge fills in after it's been played once (which persists its hash).
       const items = (await Promise.all(group.ids.map(async id => {
         const info = await cache.get(`jackettio:torrent:${id}`);
         return info ? {id, info} : null;
       }))).filter(Boolean);
+      // Gently resolve a real infohash for private link-only sources so [TB+] can show on first
+      // open. Throttled (1 at a time, spaced) + capped per group, and persisted so it's one-time.
+      let resolveBudget = HASH_RESOLVE_PER_GROUP;
+      await Promise.all(items.map(x => (async () => {
+        if(x.info.infoHash || !x.info.link)return;
+        if(resolveBudget-- <= 0)return;
+        const hash = await resolveInfoHash(x.info);
+        if(hash){
+          x.info.infoHash = hash;
+          await cache.set(`jackettio:torrent:${x.id}`, x.info, {ttl: 3 * 24 * 3600});
+        }
+      })()));
       // One batched cache/account check for all sources in the group.
       const statuses = await debridInstance.getHashesStatus(items.map(x => ({infoHash: x.info.infoHash, name: x.info.name}))).catch(() => items.map(() => ({cached: false, inAccount: false})));
       const sources = items.map((x, i) => ({...x, status: statuses[i] || {cached: false, inAccount: false}}));
