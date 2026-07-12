@@ -443,15 +443,13 @@ app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
         return respond(res, {streams: []});
       }
       const debridInstance = debrid.instance(userConfig);
-      const limit = pLimit(5);
-      const sources = (await Promise.all(group.ids.map(id => limit(async () => {
+      const items = (await Promise.all(group.ids.map(async id => {
         const info = await cache.get(`jackettio:torrent:${id}`);
-        if(!info)return null;
-        const status = info.infoHash
-          ? await debridInstance.getHashStatus(info.infoHash).catch(() => ({cached: false, inAccount: false}))
-          : {cached: false, inAccount: false};
-        return {id, info, status};
-      })))).filter(Boolean);
+        return info ? {id, info} : null;
+      }))).filter(Boolean);
+      // One batched cache/account check for all sources in the group.
+      const statuses = await debridInstance.getHashesStatus(items.map(x => ({infoHash: x.info.infoHash, name: x.info.name}))).catch(() => items.map(() => ({cached: false, inAccount: false})));
+      const sources = items.map((x, i) => ({...x, status: statuses[i] || {cached: false, inAccount: false}}));
       // Cached first, then largest.
       sources.sort((a, b) => (b.status.cached ? 1 : 0) - (a.status.cached ? 1 : 0) || (b.info.size - a.info.size));
       const streams = sources.map(({id, info, status}) => {

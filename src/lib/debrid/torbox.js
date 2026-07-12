@@ -146,21 +146,55 @@ export default class TorBox {
       }));
   }
 
-  // For a search-catalog item: is the hash instantly cached on TorBox, and is it already in the
-  // user's account? Both checks run in parallel and degrade to false on error.
-  async getHashStatus(infoHash){
-    if(!infoHash)return {cached: false, inAccount: false};
-    const hash = infoHash.toLowerCase();
-    const [cached, inAccount] = await Promise.all([
-      this.#request('POST', '/torrents/checkcached', {
-        body: JSON.stringify({hashes: [hash]}),
-        headers: {'content-type': 'application/json'},
-        query: {format: 'object', list_files: 'false'}
-      }).then(res => Object.keys(res.data || {}).some(key => key.toLowerCase() === hash)).catch(() => false),
-      this.#request('GET', '/torrents/mylist', {query: {bypass_cache: 'true'}})
-        .then(res => (res.data || []).some(torrent => `${torrent.hash || ''}`.toLowerCase() === hash)).catch(() => false)
+  // Batch status for many sources: which infohashes are instantly cached on TorBox, and which are
+  // already in the user's account (by hash, or by name for private items with no infohash). One
+  // /checkcached (batch) + one /mylist for the whole list. Returns {cached, inAccount} per source,
+  // in the same order. Degrades to false on error.
+  async getHashesStatus(sources){
+    sources = sources || [];
+    const hashes = [...new Set(sources.map(source => `${source.infoHash || ''}`.toLowerCase()).filter(Boolean))];
+    const cachedSet = new Set();
+    const accountHashes = new Set();
+    const accountNames = new Set();
+
+    await Promise.all([
+      (async () => {
+        if(!hashes.length)return;
+        // Parse the cache result tolerantly: TorBox may key data by hash (object) or return an
+        // array, and may set success=false when nothing is cached — read data regardless.
+        try {
+          const res = await fetch('https://api.torbox.app/v1/api/torrents/checkcached', {
+            method: 'POST',
+            headers: {'accept': 'application/json', 'authorization': `Bearer ${this.#apiKey}`, 'content-type': 'application/json'},
+            body: JSON.stringify({hashes})
+          });
+          const data = (await res.json().catch(() => ({}))).data;
+          if(Array.isArray(data)){
+            for(const entry of data)if(entry && entry.hash)cachedSet.add(`${entry.hash}`.toLowerCase());
+          }else if(data && typeof data === 'object'){
+            for(const key of Object.keys(data))cachedSet.add(key.toLowerCase());
+          }
+        }catch(err){}
+      })(),
+      (async () => {
+        try {
+          const res = await this.#request('GET', '/torrents/mylist', {query: {bypass_cache: 'true'}});
+          for(const torrent of (res.data || [])){
+            if(torrent.hash)accountHashes.add(`${torrent.hash}`.toLowerCase());
+            if(torrent.name)accountNames.add(`${torrent.name}`.toLowerCase());
+          }
+        }catch(err){}
+      })()
     ]);
-    return {cached, inAccount};
+
+    return sources.map(source => {
+      const hash = `${source.infoHash || ''}`.toLowerCase();
+      const name = `${source.name || ''}`.toLowerCase();
+      return {
+        cached: hash ? cachedSet.has(hash) : false,
+        inAccount: hash ? accountHashes.has(hash) : (!!name && accountNames.has(name))
+      };
+    });
   }
 
   // Catalog: return a single download's name and its video files (for meta + stream lists).
