@@ -39,7 +39,7 @@ export function parseTitleFromName(name){
 // null). Results (including misses) are cached to avoid repeated lookups on reload.
 export async function searchInfo(name){
   const {title, year} = parseTitleFromName(name);
-  if(!title)return {poster: null, imdbId: null};
+  if(!title)return {poster: null, imdbId: null, name: null};
 
   const cacheKey = `info:${title.toLowerCase()}:${year || ''}`;
   const cached = await cache.get(cacheKey);
@@ -47,9 +47,10 @@ export async function searchInfo(name){
 
   let poster = null;
   let imdbId = null;
+  let matchedName = null;
   try {
-    // Cinemeta search gives both the poster and the tt id. Try the full title, then progressively
-    // drop trailing words (junk that survived parsing).
+    // Cinemeta search gives the poster, the tt id and the canonical name. Try the full title,
+    // then progressively drop trailing words (junk that survived parsing).
     outer:
     for(const query of titleQueries(title)){
       for(const type of ['movie', 'series']){
@@ -62,6 +63,7 @@ export async function searchInfo(name){
         if(match){
           if(`${match.id || ''}`.startsWith('tt'))imdbId = match.id;
           if(match.poster)poster = match.poster;
+          if(match.name)matchedName = match.name;
           if(poster || imdbId)break outer;
         }
       }
@@ -74,7 +76,7 @@ export async function searchInfo(name){
     // keep whatever we found
   }
 
-  const result = {poster: poster || null, imdbId: imdbId || null};
+  const result = {poster: poster || null, imdbId: imdbId || null, name: matchedName || null};
   await cache.set(cacheKey, result, {ttl: 3600 * 24 * 7});
   return result;
 }

@@ -64,6 +64,12 @@ async function artworkFor(req, name){
   };
 }
 
+// Fallback when a group stash has expired but the individual torrent is still cached.
+async function singleAsGroup(id){
+  const info = await cache.get(`jackettio:torrent:${id}`);
+  return info ? {name: info.name, imdbId: null, poster: null, ids: [id]} : null;
+}
+
 const limiter = rateLimit({
   windowMs: config.rateLimitWindow * 1000,
   max: config.rateLimitRequest,
@@ -210,10 +216,9 @@ app.get("/:userConfig?/manifest.json", async(req, res) => {
   respond(res, manifest);
 });
 
-// Run a Jackett search and turn the results into Stremio metas (id: jackettio:<jackettId>).
-// recentDays > 0 keeps only items published in that window; sortKey orders results (size or
-// seeders). Each item's resolution data is stashed so meta/stream can play it without
-// re-searching. Poster lookups (cached) run with bounded concurrency.
+// Run a Jackett search and turn the results into GROUPED Stremio metas: torrents for the same
+// title/movie are merged into one item (id: jackettio:<groupId>) whose streams are the individual
+// sources. recentDays > 0 keeps only items published in that window; sortKey orders results.
 async function buildJackettMetas(req, {query, recentDays, sortKey}){
   const cutoff = Date.now() - (recentDays || 0) * 24 * 3600 * 1000;
   const raw = await searchTorrents({query});
@@ -222,36 +227,68 @@ async function buildJackettMetas(req, {query, recentDays, sortKey}){
     .sort((a, b) => (b[sortKey] || 0) - (a[sortKey] || 0) || `${a.name}`.localeCompare(`${b.name}`));
   console.log(`jackett "${query}": ${raw.length} results, ${resolvable.length} resolvable${recentDays ? `, ${sorted.length} within last ${recentDays}d` : ''}`);
 
+  // Dedupe identical torrents, then group locally by parsed title+year (no network).
   const seen = new Set();
-  const torrents = [];
+  const prelim = new Map();
   for(const item of sorted){
-    const key = itemInfoHash(item) || item.id;
-    if(seen.has(key))continue;
-    seen.add(key);
-    torrents.push(item);
-    if(torrents.length >= 50)break;
+    const dedupeKey = itemInfoHash(item) || item.id;
+    if(seen.has(dedupeKey))continue;
+    seen.add(dedupeKey);
+    const {title, year} = meta.parseTitleFromName(item.name);
+    const key = `${title.toLowerCase()}|${year || ''}`;
+    if(!prelim.has(key)){
+      if(prelim.size >= 60)continue; // cap distinct groups to bound metadata lookups
+      prelim.set(key, {title, year, sample: item.name, items: []});
+    }
+    prelim.get(key).items.push(item);
   }
 
+  // One metadata lookup per preliminary group (cached), then merge groups sharing an imdb id.
   const limit = pLimit(5);
-  return Promise.all(torrents.map(item => limit(async () => {
-    await cache.set(`jackettio:torrent:${item.id}`, {
-      id: item.id,
-      link: item.link,
-      magneturl: item.magneturl || '',
-      infoHash: item.infoHash || '',
-      name: item.name,
-      size: item.size,
-      type: item.type
-    }, {ttl: 3 * 24 * 3600});
-    return {
-      id: `jackettio:${item.id}`,
-      type: 'movie',
-      name: item.name,
-      ...(await artworkFor(req, item.name)),
-      posterShape: 'poster',
-      description: `${bytesToSize(item.size)} • 👥${item.seeders} • ⚙️${item.indexerId}`
-    };
+  const resolved = await Promise.all([...prelim.values()].map(g => limit(async () => {
+    const info = await meta.searchInfo(g.sample).catch(() => ({poster: null, imdbId: null, name: null}));
+    return {...g, info};
   })));
+
+  const merged = new Map();
+  for(const g of resolved){
+    const key = g.info.imdbId || `local:${g.title.toLowerCase()}|${g.year || ''}`;
+    if(!merged.has(key)){
+      merged.set(key, {imdbId: g.info.imdbId || null, name: g.info.name || g.title || g.sample, poster: g.info.poster || null, items: []});
+    }
+    const m = merged.get(key);
+    m.items.push(...g.items);
+    if(!m.poster && g.info.poster)m.poster = g.info.poster;
+  }
+
+  const groups = [...merged.values()]
+    .sort((a, b) => Math.max(...b.items.map(i => i.size)) - Math.max(...a.items.map(i => i.size)))
+    .slice(0, 50);
+
+  const metas = [];
+  for(const g of groups){
+    g.items.sort((a, b) => b.size - a.size);
+    for(const item of g.items){
+      await cache.set(`jackettio:torrent:${item.id}`, {
+        id: item.id, link: item.link, magneturl: item.magneturl || '', infoHash: item.infoHash || '',
+        name: item.name, size: item.size, type: item.type
+      }, {ttl: 3 * 24 * 3600});
+    }
+    const groupId = g.imdbId || g.items[0].id;
+    await cache.set(`jackettio:group:${groupId}`, {
+      name: g.name, imdbId: g.imdbId, poster: g.poster, ids: g.items.map(i => i.id)
+    }, {ttl: 3 * 24 * 3600});
+    metas.push({
+      id: `jackettio:${groupId}`,
+      type: 'movie',
+      name: g.name,
+      poster: g.poster || generatedPosterUrl(req, g.name),
+      posterShape: 'poster',
+      ...(g.imdbId ? {imdb_id: g.imdbId} : {}),
+      description: `${g.items.length} source${g.items.length > 1 ? 's' : ''}`
+    });
+  }
+  return metas;
 }
 
 // Catalog: TorBox downloads, and a Jackett "latest 4k" search. Metas get a best-effort poster
@@ -342,20 +379,21 @@ app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
     }
 
     if(req.params.id.startsWith('jackettio:')){
-      const jackettId = req.params.id.split(':')[1];
-      const info = await cache.get(`jackettio:torrent:${jackettId}`);
-      if(!info){
+      const groupId = req.params.id.split(':')[1];
+      const group = await cache.get(`jackettio:group:${groupId}`) || await singleAsGroup(groupId);
+      if(!group){
         return respond(res, {meta: {}});
       }
-      const art = await artworkFor(req, info.name);
+      const poster = group.poster || generatedPosterUrl(req, group.name);
       return respond(res, {meta: {
         id: req.params.id,
         type: 'movie',
-        name: info.name,
-        ...art,
+        name: group.name,
+        poster,
         posterShape: 'poster',
-        background: art.poster,
-        description: `${bytesToSize(info.size)}`
+        background: poster,
+        ...(group.imdbId ? {imdb_id: group.imdbId} : {}),
+        description: `${group.ids.length} source${group.ids.length > 1 ? 's' : ''} via TorBox`
       }});
     }
 
@@ -396,23 +434,37 @@ app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
       return respond(res, {streams});
     }
 
-    // Jackett search-catalog item: resolve it through TorBox at play time.
+    // Jackett group: one stream per source torrent, each marked cached (+) / "Your media".
     if(req.params.id.startsWith('jackettio:')){
       const userConfig = Object.assign(JSON.parse(atob(req.params.userConfig)), {ip: req.clientIp});
-      const jackettId = req.params.id.split(':')[1];
-      const info = await cache.get(`jackettio:torrent:${jackettId}`) || {name: jackettId, size: 0};
-      // Mark whether the torrent is cached on TorBox (+) and whether it's already in the account.
-      const status = info.infoHash
-        ? await debrid.instance(userConfig).getHashStatus(info.infoHash).catch(() => ({cached: false, inAccount: false}))
-        : {cached: false, inAccount: false};
-      const rows = [info.name];
-      if(status.inAccount)rows.push('📁 Your media');
-      rows.push(bytesToSize(info.size));
-      return respond(res, {streams: [{
-        name: `[TB${status.cached ? '+' : ''}] ${config.addonName}`,
-        title: rows.join('\n'),
-        url: `${getBaseUrl(req)}/${req.params.userConfig}/torbox/resolve/${jackettId}/${encodeURIComponent(info.name)}`
-      }]});
+      const groupId = req.params.id.split(':')[1];
+      const group = await cache.get(`jackettio:group:${groupId}`) || await singleAsGroup(groupId);
+      if(!group){
+        return respond(res, {streams: []});
+      }
+      const debridInstance = debrid.instance(userConfig);
+      const limit = pLimit(5);
+      const sources = (await Promise.all(group.ids.map(id => limit(async () => {
+        const info = await cache.get(`jackettio:torrent:${id}`);
+        if(!info)return null;
+        const status = info.infoHash
+          ? await debridInstance.getHashStatus(info.infoHash).catch(() => ({cached: false, inAccount: false}))
+          : {cached: false, inAccount: false};
+        return {id, info, status};
+      })))).filter(Boolean);
+      // Cached first, then largest.
+      sources.sort((a, b) => (b.status.cached ? 1 : 0) - (a.status.cached ? 1 : 0) || (b.info.size - a.info.size));
+      const streams = sources.map(({id, info, status}) => {
+        const rows = [info.name];
+        if(status.inAccount)rows.push('📁 Your media');
+        rows.push(bytesToSize(info.size));
+        return {
+          name: `[TB${status.cached ? '+' : ''}] ${config.addonName}`,
+          title: rows.join('\n'),
+          url: `${getBaseUrl(req)}/${req.params.userConfig}/torbox/resolve/${id}/${encodeURIComponent(info.name)}`
+        };
+      });
+      return respond(res, {streams});
     }
 
     const streams = await jackettio.getStreams(
