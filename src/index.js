@@ -13,7 +13,7 @@ import * as debrid from './lib/debrid.js';
 import {getIndexers, searchTorrents} from './lib/jackett.js';
 import * as jackettio from "./lib/jackettio.js";
 import {cleanTorrentFolder, createTorrentFolder, get as getTorrentInfos, getTorrentFile} from './lib/torrentInfos.js';
-import {bytesToSize} from './lib/util.js';
+import {bytesToSize, promiseTimeout} from './lib/util.js';
 import {generatePoster, generatePosterSvg} from './lib/poster.js';
 import pLimit from 'p-limit';
 
@@ -270,7 +270,7 @@ async function buildJackettMetas(req, {query, recentDays, sortKey}){
     g.items.sort((a, b) => b.size - a.size);
     for(const item of g.items){
       await cache.set(`jackettio:torrent:${item.id}`, {
-        id: item.id, link: item.link, magneturl: item.magneturl || '', infoHash: item.infoHash || '',
+        id: item.id, link: item.link, magneturl: item.magneturl || '', infoHash: itemInfoHash(item),
         name: item.name, size: item.size, type: item.type
       }, {ttl: 3 * 24 * 3600});
     }
@@ -443,10 +443,24 @@ app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
         return respond(res, {streams: []});
       }
       const debridInstance = debrid.instance(userConfig);
-      const items = (await Promise.all(group.ids.map(async id => {
+      // Load sources; for any lacking an infohash (private indexers that expose only a .torrent
+      // link), resolve the real hash the same way the normal flow does, and persist it so the
+      // cache check works and future opens are instant. Bounded + time-limited to stay responsive.
+      const resolveLimit = pLimit(5);
+      const items = (await Promise.all(group.ids.slice(0, 25).map(id => resolveLimit(async () => {
         const info = await cache.get(`jackettio:torrent:${id}`);
-        return info ? {id, info} : null;
-      }))).filter(Boolean);
+        if(!info)return null;
+        if(!info.infoHash && info.link){
+          try {
+            const parsed = await promiseTimeout(getTorrentInfos({link: info.link, id: info.id, name: info.name, size: info.size, infoHash: info.infoHash, type: info.type}), 6000);
+            if(parsed && parsed.infoHash){
+              info.infoHash = parsed.infoHash;
+              await cache.set(`jackettio:torrent:${id}`, info, {ttl: 3 * 24 * 3600});
+            }
+          }catch(err){}
+        }
+        return {id, info};
+      })))).filter(Boolean);
       // One batched cache/account check for all sources in the group.
       const statuses = await debridInstance.getHashesStatus(items.map(x => ({infoHash: x.info.infoHash, name: x.info.name}))).catch(() => items.map(() => ({cached: false, inAccount: false})));
       const sources = items.map((x, i) => ({...x, status: statuses[i] || {cached: false, inAccount: false}}));
