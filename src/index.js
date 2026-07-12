@@ -13,6 +13,7 @@ import * as debrid from './lib/debrid.js';
 import {getIndexers} from './lib/jackett.js';
 import * as jackettio from "./lib/jackettio.js";
 import {cleanTorrentFolder, createTorrentFolder} from './lib/torrentInfos.js';
+import {bytesToSize} from './lib/util.js';
 
 const converter = new showdown.Converter();
 const welcomeMessageHtml = config.welcomeMessage ? `${converter.makeHtml(config.welcomeMessage)}<div class="my-4 border-top border-secondary-subtle"></div>` : '';
@@ -25,6 +26,8 @@ const respond = (res, data) => {
   res.setHeader('Content-Type', 'application/json')
   res.send(data)
 };
+
+const getBaseUrl = (req) => `${req.hostname == 'localhost' ? 'http' : 'https'}://${req.hostname}`;
 
 const limiter = rateLimit({
   windowMs: config.rateLimitWindow * 1000,
@@ -130,17 +133,94 @@ app.get("/:userConfig?/manifest.json", async(req, res) => {
     const userConfig = JSON.parse(atob(req.params.userConfig));
     const debridInstance = debrid.instance(userConfig);
     manifest.name += ` ${debridInstance.shortName}`;
+    // TorBox exposes the user's completed downloads as a browsable catalog.
+    if(userConfig.debridId === 'torbox'){
+      manifest.resources = ["stream", "catalog", "meta"];
+      manifest.idPrefixes = ["tt", "torbox:"];
+      manifest.catalogs = [
+        {type: "movie", id: "torbox-downloads", name: "TorBox Downloads"}
+      ];
+    }
   }
   respond(res, manifest);
+});
+
+// Catalog: list the user's TorBox downloads as Stremio meta previews.
+app.get("/:userConfig/catalog/:type/:id.json", async(req, res) => {
+  try {
+    const userConfig = JSON.parse(atob(req.params.userConfig));
+    if(userConfig.debridId !== 'torbox' || req.params.id !== 'torbox-downloads'){
+      return respond(res, {metas: []});
+    }
+    const debridInstance = debrid.instance(Object.assign(userConfig, {ip: req.clientIp}));
+    const items = await debridInstance.getCatalogItems();
+    const metas = items.map(item => ({
+      id: `torbox:${item.id}`,
+      type: 'movie',
+      name: item.name,
+      poster: `${getBaseUrl(req)}/icon`,
+      posterShape: 'square',
+      description: `TorBox download — ${bytesToSize(item.size)}`
+    }));
+    return respond(res, {metas});
+  }catch(err){
+    console.log('catalog', err);
+    return respond(res, {metas: []});
+  }
+});
+
+// Meta: detail page for a single TorBox download (id: torbox:<torrentId>).
+app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
+  try {
+    const userConfig = JSON.parse(atob(req.params.userConfig));
+    if(userConfig.debridId !== 'torbox' || !req.params.id.startsWith('torbox:')){
+      return respond(res, {meta: {}});
+    }
+    const torrentId = req.params.id.split(':')[1];
+    const debridInstance = debrid.instance(Object.assign(userConfig, {ip: req.clientIp}));
+    const details = await debridInstance.getTorrentDetails(torrentId);
+    if(!details){
+      return respond(res, {meta: {}});
+    }
+    const meta = {
+      id: req.params.id,
+      type: 'movie',
+      name: details.name,
+      poster: `${getBaseUrl(req)}/icon`,
+      posterShape: 'square',
+      description: details.files.map(file => `${file.name} — ${bytesToSize(file.size)}`).join('\n')
+    };
+    return respond(res, {meta});
+  }catch(err){
+    console.log('meta', err);
+    return respond(res, {meta: {}});
+  }
 });
 
 app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
 
   try {
 
+    // TorBox catalog items resolve to the download's video files instead of a Jackett search.
+    if(req.params.id.startsWith('torbox:')){
+      const userConfig = Object.assign(JSON.parse(atob(req.params.userConfig)), {ip: req.clientIp});
+      const torrentId = req.params.id.split(':')[1];
+      const debridInstance = debrid.instance(userConfig);
+      const details = await debridInstance.getTorrentDetails(torrentId);
+      const streams = (details ? details.files : []).map(file => {
+        const [tId, fId] = file.id.split(':');
+        return {
+          name: `[TB] ${config.addonName}`,
+          title: `${file.name}\n${bytesToSize(file.size)}`,
+          url: `${getBaseUrl(req)}/${req.params.userConfig}/torbox/play/${tId}/${fId}/${encodeURIComponent(file.name)}`
+        };
+      });
+      return respond(res, {streams});
+    }
+
     const streams = await jackettio.getStreams(
       Object.assign(JSON.parse(atob(req.params.userConfig)), {ip: req.clientIp}),
-      req.params.type, 
+      req.params.type,
       req.params.id,
       `${req.hostname == 'localhost' ? 'http' : 'https'}://${req.hostname}`
     );
@@ -163,6 +243,53 @@ app.get("/stream/:type/:id.json", async(req, res) => {
     title: `ℹ Kindly configure this addon to access streams.`,
     url: '#'
   }]});
+
+});
+
+// Resolve a TorBox catalog stream to a playable link at play time (lazy, like /download).
+app.use('/:userConfig/torbox/play/:torrentId/:fileId/:name?', async(req, res, next) => {
+
+  if (req.method !== 'GET' && req.method !== 'HEAD'){
+    return next();
+  }
+
+  try {
+
+    const userConfig = Object.assign(JSON.parse(atob(req.params.userConfig)), {ip: req.clientIp});
+    const debridInstance = debrid.instance(userConfig);
+    const url = await debridInstance.getDownload({id: `${req.params.torrentId}:${req.params.fileId}`});
+
+    res.status(302);
+    res.set('location', url);
+    res.send('');
+
+  }catch(err){
+
+    console.log('torbox play', err);
+
+    switch(err.message){
+      case debrid.ERROR.NOT_READY:
+        res.status(302);
+        res.set('location', `/videos/not_ready.mp4`);
+        res.send('');
+        break;
+      case debrid.ERROR.EXPIRED_API_KEY:
+        res.status(302);
+        res.set('location', `/videos/expired_api_key.mp4`);
+        res.send('');
+        break;
+      case debrid.ERROR.NOT_PREMIUM:
+        res.status(302);
+        res.set('location', `/videos/not_premium.mp4`);
+        res.send('');
+        break;
+      default:
+        res.status(302);
+        res.set('location', `/videos/error.mp4`);
+        res.send('');
+    }
+
+  }
 
 });
 

@@ -1,6 +1,7 @@
 import {createHash} from 'crypto';
 import {basename} from 'path';
 import {ERROR} from './const.js';
+import {isVideo} from '../util.js';
 
 export default class TorBox {
 
@@ -105,6 +106,35 @@ export default class TorBox {
 
   async getUserHash(){
     return createHash('md5').update(this.#apiKey).digest('hex');
+  }
+
+  // Catalog: list the user's completed downloads that contain at least one video file.
+  // Newest first. Used to source the "TorBox Downloads" Stremio catalog.
+  async getCatalogItems(){
+    const res = await this.#request('GET', '/torrents/mylist', {query: {bypass_cache: 'true'}});
+    return (res.data || [])
+      .filter(torrent => torrent.download_present && (torrent.files || []).some(file => isVideo(file.name)))
+      .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
+      .map(torrent => ({
+        id: torrent.id,
+        name: torrent.name,
+        size: torrent.size
+      }));
+  }
+
+  // Catalog: return a single download's name and its video files (for meta + stream lists).
+  async getTorrentDetails(torrentId){
+    const torrent = await this.#getTorrent(torrentId);
+    if(!torrent)return null;
+    const files = (torrent.files || [])
+      .filter(file => isVideo(file.name))
+      .map(file => ({
+        name: file.short_name || basename(file.name),
+        size: file.size,
+        id: `${torrent.id}:${file.id}`,
+        ready: !!torrent.download_present
+      }));
+    return {id: torrent.id, name: torrent.name, size: torrent.size, files};
   }
 
   async #getTorrent(torrentId){
