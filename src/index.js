@@ -13,7 +13,7 @@ import * as debrid from './lib/debrid.js';
 import {getIndexers, searchTorrents} from './lib/jackett.js';
 import * as jackettio from "./lib/jackettio.js";
 import {cleanTorrentFolder, createTorrentFolder, get as getTorrentInfos, getTorrentFile} from './lib/torrentInfos.js';
-import {bytesToSize, promiseTimeout} from './lib/util.js';
+import {bytesToSize} from './lib/util.js';
 import {generatePoster, generatePosterSvg} from './lib/poster.js';
 import pLimit from 'p-limit';
 
@@ -536,24 +536,14 @@ app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
         return respond(res, {streams: []});
       }
       const debridInstance = debrid.instance(userConfig);
-      // Load sources; for any lacking an infohash (private indexers that expose only a .torrent
-      // link), resolve the real hash the same way the normal flow does, and persist it so the
-      // cache check works and future opens are instant. Bounded + time-limited to stay responsive.
-      const resolveLimit = pLimit(5);
-      const items = (await Promise.all(group.ids.slice(0, 25).map(id => resolveLimit(async () => {
+      // Use only hashes we already know (from the magnet, or resolved+persisted on a previous
+      // play). We deliberately DON'T download .torrent files here just for the cached badge —
+      // that hammers private trackers' download endpoints (rate limits / Cloudflare 1015). For a
+      // link-only source the badge fills in after it's been played once (which persists its hash).
+      const items = (await Promise.all(group.ids.map(async id => {
         const info = await cache.get(`jackettio:torrent:${id}`);
-        if(!info)return null;
-        if(!info.infoHash && info.link){
-          try {
-            const parsed = await promiseTimeout(getTorrentInfos({link: info.link, id: info.id, name: info.name, size: info.size, infoHash: info.infoHash, type: info.type}), 6000);
-            if(parsed && parsed.infoHash){
-              info.infoHash = parsed.infoHash;
-              await cache.set(`jackettio:torrent:${id}`, info, {ttl: 3 * 24 * 3600});
-            }
-          }catch(err){}
-        }
-        return {id, info};
-      })))).filter(Boolean);
+        return info ? {id, info} : null;
+      }))).filter(Boolean);
       // One batched cache/account check for all sources in the group.
       const statuses = await debridInstance.getHashesStatus(items.map(x => ({infoHash: x.info.infoHash, name: x.info.name}))).catch(() => items.map(() => ({cached: false, inAccount: false})));
       const sources = items.map((x, i) => ({...x, status: statuses[i] || {cached: false, inAccount: false}}));
@@ -625,6 +615,11 @@ app.use('/:userConfig/torbox/resolve/:id/:name?', async(req, res, next) => {
       // Private indexer (no magnet): download + parse the .torrent from the indexer link,
       // then upload it to TorBox (or use the magnet if parsing yields a public one).
       const infos = await getTorrentInfos({link: raw.link, id: raw.id, name: raw.name, size: raw.size, infoHash: raw.infoHash, type: raw.type});
+      // Persist the resolved hash so the cached badge can show next time — no extra download.
+      if(infos.infoHash && !raw.infoHash){
+        raw.infoHash = infos.infoHash;
+        await cache.set(`jackettio:torrent:${req.params.id}`, raw, {ttl: 3 * 24 * 3600});
+      }
       if(infos.magnetUrl){
         url = await debridInstance.getMagnetDownload(infos.magnetUrl, infos.infoHash);
       }else{
