@@ -132,6 +132,13 @@ async function jackettApi(path, query){
     throw new Error(`jackettApi: ${url.replace(/apikey=[a-z0-9\-]+/, 'apikey=****')} : HTTP ${res.status}`);
   }
 
+  // Diagnostic for misconfigured Jackett: log a snippet only when the body is NOT XML/torznab
+  // (avoids leaking magnet passkeys from a valid torznab feed).
+  const looksXml = text.trimStart().startsWith('<');
+  if(!looksXml){
+    console.log(`jackettApi: non-XML response (status ${res.status}, content-type "${contentType}"): ${text.slice(0, 160)}`);
+  }
+
   if(contentType.includes('application/json')){
     data = JSON.parse(text);
   }else{

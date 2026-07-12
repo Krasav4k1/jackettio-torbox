@@ -215,10 +215,13 @@ app.get("/:userConfig/catalog/:type/:id.json", async(req, res) => {
     if(req.params.id === 'latest-4k'){
       // Jackett search "4k", keep items published in the last 3 days, sort by size desc, dedupe.
       const cutoff = Date.now() - 3 * 24 * 3600 * 1000;
-      const sorted = (await searchTorrents({query: '4k'}))
-        .map(item => ({...item, infoHash: itemInfoHash(item)}))
-        .filter(item => item.infoHash && item.pubDate >= cutoff)
+      const raw = (await searchTorrents({query: '4k'})).map(item => ({...item, infoHash: itemInfoHash(item)}));
+      const withHash = raw.filter(item => item.infoHash);
+      const withDate = withHash.filter(item => item.pubDate > 0);
+      const sorted = withHash
+        .filter(item => item.pubDate >= cutoff)
         .sort((a, b) => b.size - a.size);
+      console.log(`latest-4k: ${raw.length} results, ${withHash.length} with infohash, ${withDate.length} with a pubDate, ${sorted.length} within last 3 days`);
       const seen = new Set();
       const torrents = [];
       for(const item of sorted){
