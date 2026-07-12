@@ -14,7 +14,7 @@ import {getIndexers, searchTorrents} from './lib/jackett.js';
 import * as jackettio from "./lib/jackettio.js";
 import {cleanTorrentFolder, createTorrentFolder, get as getTorrentInfos, getTorrentFile} from './lib/torrentInfos.js';
 import {bytesToSize} from './lib/util.js';
-import {generatePoster} from './lib/poster.js';
+import {generatePoster, generatePosterSvg} from './lib/poster.js';
 import pLimit from 'p-limit';
 
 const converter = new showdown.Converter();
@@ -100,19 +100,21 @@ app.get('/icon', async (req, res) => {
 });
 
 // Generated fallback poster: a title-on-color image for catalog items without real artwork.
+// Prefers a PNG (native canvas, best client compatibility); if canvas is unavailable on the
+// host it serves a dependency-free SVG instead, so a generated poster always renders.
 app.get('/poster.png', async (req, res) => {
+  const title = `${req.query.title || 'Unknown'}`.slice(0, 120);
+  const subtitle = req.query.tag ? `${req.query.tag}`.slice(0, 40) : '';
   try {
-    const title = `${req.query.title || 'Unknown'}`.slice(0, 120);
-    const subtitle = req.query.tag ? `${req.query.tag}`.slice(0, 40) : '';
     const buffer = await generatePoster(title, subtitle);
     res.setHeader('Content-Type', 'image/png');
     res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
     return res.send(buffer);
   }catch(err){
-    console.log('poster', err);
-    res.status(302);
-    res.set('location', '/icon');
-    return res.send('');
+    console.log('poster (png unavailable, serving svg)', err.message || err);
+    res.setHeader('Content-Type', 'image/svg+xml');
+    res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
+    return res.send(generatePosterSvg(title, subtitle));
   }
 });
 

@@ -29,6 +29,64 @@ function hash32(str){
   return h >>> 0;
 }
 
+function escapeXml(str){
+  return `${str}`.replace(/[<>&"']/g, c => ({'<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;'}[c]));
+}
+
+// HSL (h in degrees, s/l in %) -> #rrggbb, so the SVG works in renderers without hsl() support.
+function hslToHex(h, s, l){
+  s /= 100; l /= 100;
+  const k = n => (n + h / 30) % 12;
+  const a = s * Math.min(l, 1 - l);
+  const f = n => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+  const toHex = x => Math.round(x * 255).toString(16).padStart(2, '0');
+  return `#${toHex(f(0))}${toHex(f(8))}${toHex(f(4))}`;
+}
+
+// Dependency-free SVG poster — same look as the PNG, used when native canvas is unavailable
+// (e.g. serverless without the binary). Renders with the client's default sans font.
+export function generatePosterSvg(title, subtitle){
+  const W = 300, H = 450, pad = 24;
+  const hue = hash32(title || '?') % 360;
+
+  // Char-estimate word wrap (no measureText available), shrinking to fit <=5 lines.
+  const words = `${title || 'Unknown'}`.split(/\s+/).filter(Boolean);
+  let size = 34, lines = [];
+  while(true){
+    const maxChars = Math.max(6, Math.floor((W - pad * 2) / (size * 0.56)));
+    lines = [];
+    let line = '';
+    for(const word of words){
+      const test = line ? `${line} ${word}` : word;
+      if(test.length <= maxChars || !line){
+        line = test;
+      }else{
+        lines.push(line);
+        line = word;
+        if(lines.length === 5)break;
+      }
+    }
+    if(line && lines.length < 5)lines.push(line);
+    if(lines.length <= 4 || size <= 20)break;
+    size -= 2;
+  }
+
+  const lineHeight = size * 1.16;
+  let y = (H - lines.length * lineHeight) / 2 + size * 0.82;
+  const tspans = lines.map((line, i) => `<tspan x="${W / 2}" y="${Math.round(y + i * lineHeight)}">${escapeXml(line)}</tspan>`).join('');
+  const subEl = subtitle ? `<text x="${W / 2}" y="${Math.round(y + lines.length * lineHeight + 8)}" fill="rgba(255,255,255,0.62)" font-size="16" text-anchor="middle" font-family="sans-serif">${escapeXml(subtitle)}</text>` : '';
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`
+    + `<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">`
+    + `<stop offset="0" stop-color="${hslToHex(hue, 42, 26)}"/><stop offset="1" stop-color="${hslToHex(hue, 46, 13)}"/></linearGradient></defs>`
+    + `<rect width="${W}" height="${H}" fill="url(#g)"/>`
+    + `<rect width="${W}" height="6" fill="${hslToHex(hue, 62, 58)}"/>`
+    + `<text fill="#f6f5f3" font-size="${size}" font-weight="bold" text-anchor="middle" font-family="sans-serif">${tspans}</text>`
+    + subEl
+    + `<text x="${W / 2}" y="${H - 20}" fill="rgba(255,255,255,0.5)" font-size="13" text-anchor="middle" font-family="sans-serif">TorBox</text>`
+    + `</svg>`;
+}
+
 function wrapLines(ctx, text, maxWidth, maxLines){
   const words = `${text}`.split(/\s+/).filter(Boolean);
   const lines = [];
