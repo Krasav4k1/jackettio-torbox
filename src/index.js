@@ -209,7 +209,7 @@ async function buildJackettMetas(req, {query, recentDays, sortKey}){
   const raw = await searchTorrents({query});
   const resolvable = raw.filter(item => item.link || item.magneturl || item.infoHash);
   const sorted = (recentDays ? resolvable.filter(item => item.pubDate >= cutoff) : resolvable)
-    .sort((a, b) => (b[sortKey] || 0) - (a[sortKey] || 0));
+    .sort((a, b) => (b[sortKey] || 0) - (a[sortKey] || 0) || `${a.name}`.localeCompare(`${b.name}`));
   console.log(`jackett "${query}": ${raw.length} results, ${resolvable.length} resolvable${recentDays ? `, ${sorted.length} within last ${recentDays}d` : ''}`);
 
   const seen = new Set();
@@ -296,7 +296,7 @@ app.get("/:userConfig/catalog/:type/:id/:extra.json", async(req, res) => {
     if(userConfig.debridId !== 'torbox' || req.params.id !== 'jackettio-search' || !query){
       return respond(res, {metas: []});
     }
-    const metas = await buildJackettMetas(req, {query, recentDays: 0, sortKey: 'seeders'});
+    const metas = await buildJackettMetas(req, {query, recentDays: 0, sortKey: 'size'});
     return respond(res, {metas});
   }catch(err){
     console.log('search catalog', err);
