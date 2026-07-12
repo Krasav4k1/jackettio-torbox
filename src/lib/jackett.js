@@ -125,10 +125,16 @@ async function jackettApi(path, query){
 
   let data;
   const res = await fetch(url);
-  if(res.headers.get('content-type').includes('application/json')){
-    data = await res.json();
+  const contentType = res.headers.get('content-type') || '';
+  const text = await res.text();
+
+  if(!res.ok && !text){
+    throw new Error(`jackettApi: ${url.replace(/apikey=[a-z0-9\-]+/, 'apikey=****')} : HTTP ${res.status}`);
+  }
+
+  if(contentType.includes('application/json')){
+    data = JSON.parse(text);
   }else{
-    const text = await res.text();
     const parser = new Parser({explicitArray: false, ignoreAttrs: false});
     data = await parser.parseStringPromise(text);
   }
