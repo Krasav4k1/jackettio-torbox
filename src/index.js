@@ -106,7 +106,7 @@ app.get('/:userConfig?/configure', async(req, res) => {
       pattern: config.replacePasskeyPattern
     }
   }
-  let template = readFileSync(`./src/template/configure.html`).toString()
+  let template = readFileSync(path.join(import.meta.dirname, 'template/configure.html')).toString()
     .replace('/** import-config */', `const config = ${JSON.stringify(templateConfig, null, 2)}`)
     .replace('<!-- welcome-message -->', welcomeMessageHtml);
   return res.send(template);
