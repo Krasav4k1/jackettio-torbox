@@ -7,6 +7,7 @@ Selfhosted Stremio addon that resolve streams using Jackett and Debrid. It seaml
 - Resolve streams using Jackett and Debrid (debrid-link, alldebrid, real-debrid, premiumize, torbox)
 - **TorBox Downloads catalog** — browse your TorBox account's completed downloads (movies & TV) directly in Stremio and play any file (shown when TorBox is the selected debrid). Posters are matched via Cinemeta/TMDB, with a generated title poster as a fallback
 - **Latest added 4k (3d) catalog** — a Jackett "4k" search filtered to torrents published in the last 3 days, sorted by size; play any item and TorBox fetches it on demand
+- **Stremio search** — searching in Stremio runs a Jackett search (sorted by seeders); results play through TorBox and show cached / "Your media" status
 - Public / Private trackers
 - TV packs priority
 - Sorting

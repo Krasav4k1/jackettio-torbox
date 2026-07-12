@@ -181,12 +181,65 @@ app.get("/:userConfig?/manifest.json", async(req, res) => {
       manifest.idPrefixes = ["tt", "torbox:", "jackettio:"];
       manifest.catalogs = [
         {type: "movie", id: "torbox-downloads", name: "TorBox Downloads"},
-        {type: "movie", id: "latest-4k", name: "Latest added 4k (3d)"}
+        {type: "movie", id: "latest-4k", name: "Latest added 4k (3d)"},
+        // Search-only catalog: appears when the user searches in Stremio, runs a Jackett search.
+        {
+          type: "movie",
+          id: "jackettio-search",
+          name: "Jackett",
+          extra: [{name: "search", isRequired: true}],
+          extraSupported: ["search"],
+          extraRequired: ["search"]
+        }
       ];
     }
   }
   respond(res, manifest);
 });
+
+// Run a Jackett search and turn the results into Stremio metas (id: jackettio:<jackettId>).
+// recentOnly keeps only the last 3 days; sortKey orders results (size or seeders). Each item's
+// resolution data is stashed so meta/stream can play it without re-searching. Poster lookups
+// (cached) run with bounded concurrency.
+async function buildJackettMetas(req, {query, recentOnly, sortKey}){
+  const cutoff = Date.now() - 3 * 24 * 3600 * 1000;
+  const raw = await searchTorrents({query});
+  const resolvable = raw.filter(item => item.link || item.magneturl || item.infoHash);
+  const sorted = (recentOnly ? resolvable.filter(item => item.pubDate >= cutoff) : resolvable)
+    .sort((a, b) => (b[sortKey] || 0) - (a[sortKey] || 0));
+  console.log(`jackett "${query}": ${raw.length} results, ${resolvable.length} resolvable${recentOnly ? `, ${sorted.length} within last 3 days` : ''}`);
+
+  const seen = new Set();
+  const torrents = [];
+  for(const item of sorted){
+    const key = itemInfoHash(item) || item.id;
+    if(seen.has(key))continue;
+    seen.add(key);
+    torrents.push(item);
+    if(torrents.length >= 50)break;
+  }
+
+  const limit = pLimit(5);
+  return Promise.all(torrents.map(item => limit(async () => {
+    await cache.set(`jackettio:torrent:${item.id}`, {
+      id: item.id,
+      link: item.link,
+      magneturl: item.magneturl || '',
+      infoHash: item.infoHash || '',
+      name: item.name,
+      size: item.size,
+      type: item.type
+    }, {ttl: 3 * 24 * 3600});
+    return {
+      id: `jackettio:${item.id}`,
+      type: 'movie',
+      name: item.name,
+      poster: (await meta.searchPoster(item.name).catch(() => null)) || generatedPosterUrl(req, item.name),
+      posterShape: 'poster',
+      description: `${bytesToSize(item.size)} • 👥${item.seeders} • ⚙️${item.indexerId}`
+    };
+  })));
+}
 
 // Catalog: TorBox downloads, and a Jackett "latest 4k" search. Metas get a best-effort poster
 // lookup (cached) with bounded concurrency to stay responsive.
@@ -213,52 +266,31 @@ app.get("/:userConfig/catalog/:type/:id.json", async(req, res) => {
     }
 
     if(req.params.id === 'latest-4k'){
-      // Jackett search "4k", keep items published in the last 3 days, sort by size desc, dedupe.
-      // Items are keyed by Jackett's own id (not infohash) so private indexers — which usually
-      // expose only a .torrent download link, no infohash/magnet — are supported too.
-      const cutoff = Date.now() - 3 * 24 * 3600 * 1000;
-      const raw = await searchTorrents({query: '4k'});
-      const resolvable = raw.filter(item => item.link || item.magneturl || item.infoHash);
-      const withDate = resolvable.filter(item => item.pubDate > 0);
-      const sorted = resolvable
-        .filter(item => item.pubDate >= cutoff)
-        .sort((a, b) => b.size - a.size);
-      console.log(`latest-4k: ${raw.length} results, ${resolvable.length} resolvable, ${withDate.length} with a pubDate, ${sorted.length} within last 3 days`);
-      const seen = new Set();
-      const torrents = [];
-      for(const item of sorted){
-        const key = itemInfoHash(item) || item.id;
-        if(seen.has(key))continue;
-        seen.add(key);
-        torrents.push(item);
-        if(torrents.length >= 50)break;
-      }
-      const metas = await Promise.all(torrents.map(item => limit(async () => {
-        // Stash everything the resolver needs so meta/stream work without re-searching Jackett.
-        await cache.set(`jackettio:torrent:${item.id}`, {
-          id: item.id,
-          link: item.link,
-          magneturl: item.magneturl || '',
-          infoHash: item.infoHash || '',
-          name: item.name,
-          size: item.size,
-          type: item.type
-        }, {ttl: 3 * 24 * 3600});
-        return {
-          id: `jackettio:${item.id}`,
-          type: 'movie',
-          name: item.name,
-          poster: (await meta.searchPoster(item.name).catch(() => null)) || generatedPosterUrl(req, item.name),
-          posterShape: 'poster',
-          description: `${bytesToSize(item.size)} • 👥${item.seeders} • ⚙️${item.indexerId}`
-        };
-      })));
+      // Jackett search "4k", keep items published in the last 3 days, sort by size desc.
+      const metas = await buildJackettMetas(req, {query: '4k', recentOnly: true, sortKey: 'size'});
       return respond(res, {metas});
     }
 
     return respond(res, {metas: []});
   }catch(err){
     console.log('catalog', err);
+    return respond(res, {metas: []});
+  }
+});
+
+// Search catalog: Stremio calls this with an ".../:id/search=<query>.json" extra segment.
+app.get("/:userConfig/catalog/:type/:id/:extra.json", async(req, res) => {
+  noCache(res);
+  try {
+    const userConfig = Object.assign(JSON.parse(atob(req.params.userConfig)), {ip: req.clientIp});
+    const query = (new URLSearchParams(req.params.extra).get('search') || '').trim();
+    if(userConfig.debridId !== 'torbox' || req.params.id !== 'jackettio-search' || !query){
+      return respond(res, {metas: []});
+    }
+    const metas = await buildJackettMetas(req, {query, recentOnly: false, sortKey: 'seeders'});
+    return respond(res, {metas});
+  }catch(err){
+    console.log('search catalog', err);
     return respond(res, {metas: []});
   }
 });
