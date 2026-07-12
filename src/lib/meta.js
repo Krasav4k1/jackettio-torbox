@@ -34,46 +34,49 @@ export function parseTitleFromName(name){
   return {title, year: yearMatch ? parseInt(yearMatch[0]) : null};
 }
 
-// Best-effort poster lookup by name via Cinemeta's free search catalog. Returns a poster URL
-// or null. Results (including "not found") are cached to avoid repeated lookups on reload.
-export async function searchPoster(name){
+// Best-effort lookup by name via Cinemeta's free search catalog (which yields both a poster and
+// the IMDb id) plus TMDB for a poster when configured. Returns {poster, imdbId} (either may be
+// null). Results (including misses) are cached to avoid repeated lookups on reload.
+export async function searchInfo(name){
   const {title, year} = parseTitleFromName(name);
-  if(!title)return null;
+  if(!title)return {poster: null, imdbId: null};
 
-  const cacheKey = `poster:${title.toLowerCase()}:${year || ''}`;
+  const cacheKey = `info:${title.toLowerCase()}:${year || ''}`;
   const cached = await cache.get(cacheKey);
-  if(cached !== undefined)return cached || null;
+  if(cached !== undefined)return cached;
 
   let poster = null;
+  let imdbId = null;
   try {
-    // Prefer TMDB when a token is configured (better search), then fall back to Cinemeta.
-    if(config.tmdbAccessToken){
-      poster = await promiseTimeout(searchTmdb(title, year), 3000).catch(() => null);
-    }
-    if(!poster){
-      // Try the full title, then progressively drop trailing words (junk that survived parsing).
-      outer:
-      for(const query of titleQueries(title)){
-        for(const type of ['movie', 'series']){
-          const metas = await promiseTimeout(searchCinemeta(type, query), 3000).catch(() => []);
-          let match = metas[0];
-          if(year){
-            const byYear = metas.find(m => `${m.releaseInfo || ''}`.startsWith(`${year}`));
-            if(byYear)match = byYear;
-          }
-          if(match && match.poster){
-            poster = match.poster;
-            break outer;
-          }
+    // Cinemeta search gives both the poster and the tt id. Try the full title, then progressively
+    // drop trailing words (junk that survived parsing).
+    outer:
+    for(const query of titleQueries(title)){
+      for(const type of ['movie', 'series']){
+        const metas = await promiseTimeout(searchCinemeta(type, query), 3000).catch(() => []);
+        let match = metas[0];
+        if(year){
+          const byYear = metas.find(m => `${m.releaseInfo || ''}`.startsWith(`${year}`));
+          if(byYear)match = byYear;
+        }
+        if(match){
+          if(`${match.id || ''}`.startsWith('tt'))imdbId = match.id;
+          if(match.poster)poster = match.poster;
+          if(poster || imdbId)break outer;
         }
       }
     }
+    // TMDB can provide a nicer poster when configured; keep the Cinemeta tt id.
+    if(config.tmdbAccessToken && !poster){
+      poster = await promiseTimeout(searchTmdb(title, year), 3000).catch(() => null);
+    }
   }catch(err){
-    poster = null;
+    // keep whatever we found
   }
 
-  await cache.set(cacheKey, poster || '', {ttl: 3600 * 24 * 7});
-  return poster;
+  const result = {poster: poster || null, imdbId: imdbId || null};
+  await cache.set(cacheKey, result, {ttl: 3600 * 24 * 7});
+  return result;
 }
 
 // Full title, then shrinking prefixes (down to 2 words) to survive trailing junk in names.

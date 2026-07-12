@@ -54,6 +54,16 @@ const generatedPosterUrl = (req, name) => {
   return `${getBaseUrl(req)}/poster.png?${query.toString()}`;
 };
 
+// Artwork fields for a media title: a poster (real or generated) and the imdb_id (tt) when the
+// title resolves to a real IMDb entry. Spread into a meta/metaPreview object.
+async function artworkFor(req, name){
+  const info = await meta.searchInfo(name).catch(() => ({poster: null, imdbId: null}));
+  return {
+    poster: info.poster || generatedPosterUrl(req, name),
+    ...(info.imdbId ? {imdb_id: info.imdbId} : {})
+  };
+}
+
 const limiter = rateLimit({
   windowMs: config.rateLimitWindow * 1000,
   max: config.rateLimitRequest,
@@ -237,7 +247,7 @@ async function buildJackettMetas(req, {query, recentDays, sortKey}){
       id: `jackettio:${item.id}`,
       type: 'movie',
       name: item.name,
-      poster: (await meta.searchPoster(item.name).catch(() => null)) || generatedPosterUrl(req, item.name),
+      ...(await artworkFor(req, item.name)),
       posterShape: 'poster',
       description: `${bytesToSize(item.size)} • 👥${item.seeders} • ⚙️${item.indexerId}`
     };
@@ -261,7 +271,7 @@ app.get("/:userConfig/catalog/:type/:id.json", async(req, res) => {
         id: `torbox:${item.id}`,
         type: 'movie',
         name: item.name,
-        poster: (await meta.searchPoster(item.name).catch(() => null)) || generatedPosterUrl(req, item.name),
+        ...(await artworkFor(req, item.name)),
         posterShape: 'poster',
         description: `TorBox download — ${bytesToSize(item.size)}`
       }))));
@@ -319,14 +329,14 @@ app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
       if(!details){
         return respond(res, {meta: {}});
       }
-      const posterUrl = (await meta.searchPoster(details.name).catch(() => null)) || generatedPosterUrl(req, details.name);
+      const art = await artworkFor(req, details.name);
       return respond(res, {meta: {
         id: req.params.id,
         type: 'movie',
         name: details.name,
-        poster: posterUrl,
+        ...art,
         posterShape: 'poster',
-        background: posterUrl,
+        background: art.poster,
         description: details.files.map(file => `${file.name} — ${bytesToSize(file.size)}`).join('\n')
       }});
     }
@@ -337,14 +347,14 @@ app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
       if(!info){
         return respond(res, {meta: {}});
       }
-      const posterUrl = (await meta.searchPoster(info.name).catch(() => null)) || generatedPosterUrl(req, info.name);
+      const art = await artworkFor(req, info.name);
       return respond(res, {meta: {
         id: req.params.id,
         type: 'movie',
         name: info.name,
-        poster: posterUrl,
+        ...art,
         posterShape: 'poster',
-        background: posterUrl,
+        background: art.poster,
         description: `${bytesToSize(info.size)}`
       }});
     }
