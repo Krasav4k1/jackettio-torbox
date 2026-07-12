@@ -16,7 +16,7 @@ import {cleanTorrentFolder, createTorrentFolder} from './lib/torrentInfos.js';
 
 const converter = new showdown.Converter();
 const welcomeMessageHtml = config.welcomeMessage ? `${converter.makeHtml(config.welcomeMessage)}<div class="my-4 border-top border-secondary-subtle"></div>` : '';
-const addon = JSON.parse(readFileSync(`./package.json`));
+const addon = JSON.parse(readFileSync(path.join(import.meta.dirname, '../package.json')));
 const app = express();
 
 const respond = (res, data) => {
@@ -246,44 +246,58 @@ app.use((err, req, res, next) => {
   }
 })
 
-const server = app.listen(config.port, async () => {
+// Ensure the torrent working folder exists in every runtime (including serverless).
+createTorrentFolder();
 
-  console.log('───────────────────────────────────────');
-  console.log(`Started addon ${addon.name} v${addon.version}`);
-  console.log(`Server listen at: http://localhost:${config.port}`);
-  console.log('───────────────────────────────────────');
+// Start the long-running HTTP server with its background jobs. Skipped on serverless
+// platforms (e.g. Vercel), where the app is exported and invoked per-request instead.
+function startServer(){
 
-  let tunnel;
-  if(config.localtunnel){
-    let subdomain = await cache.get('localtunnel:subdomain');
-    tunnel = await localtunnel({port: config.port, subdomain});
-    await cache.set('localtunnel:subdomain', tunnel.clientId, {ttl: 86400*365});
-    console.log(`Your addon is available on the following address: ${tunnel.url}/configure`);
-    tunnel.on('close', () => console.log("tunnels are closed"));
-  }
+  const server = app.listen(config.port, async () => {
 
-  icon.download().catch(err => console.log(`Failed to download icon: ${err}`));
+    console.log('───────────────────────────────────────');
+    console.log(`Started addon ${addon.name} v${addon.version}`);
+    console.log(`Server listen at: http://localhost:${config.port}`);
+    console.log('───────────────────────────────────────');
 
-  const intervals = [];
-  createTorrentFolder();
-  intervals.push(setInterval(cleanTorrentFolder, 3600e3));
+    let tunnel;
+    if(config.localtunnel){
+      let subdomain = await cache.get('localtunnel:subdomain');
+      tunnel = await localtunnel({port: config.port, subdomain});
+      await cache.set('localtunnel:subdomain', tunnel.clientId, {ttl: 86400*365});
+      console.log(`Your addon is available on the following address: ${tunnel.url}/configure`);
+      tunnel.on('close', () => console.log("tunnels are closed"));
+    }
 
-  vacuumCache().catch(err => console.log(`Failed to vacuum cache: ${err}`));
-  intervals.push(setInterval(() => vacuumCache(), 86400e3*7));
+    icon.download().catch(err => console.log(`Failed to download icon: ${err}`));
 
-  cleanCache().catch(err => console.log(`Failed to clean cache: ${err}`));
-  intervals.push(setInterval(() => cleanCache(), 3600e3));
+    const intervals = [];
+    intervals.push(setInterval(cleanTorrentFolder, 3600e3));
 
-  function closeGracefully(signal) {
-    console.log(`Received signal to terminate: ${signal}`);
-    if(tunnel)tunnel.close();
-    intervals.forEach(interval => clearInterval(interval));
-    server.close(() => {
-      console.log('Server closed');
-      process.kill(process.pid, signal);
-    });
-  }
-  process.once('SIGINT', closeGracefully);
-  process.once('SIGTERM', closeGracefully);
+    vacuumCache().catch(err => console.log(`Failed to vacuum cache: ${err}`));
+    intervals.push(setInterval(() => vacuumCache(), 86400e3*7));
 
-});
+    cleanCache().catch(err => console.log(`Failed to clean cache: ${err}`));
+    intervals.push(setInterval(() => cleanCache(), 3600e3));
+
+    function closeGracefully(signal) {
+      console.log(`Received signal to terminate: ${signal}`);
+      if(tunnel)tunnel.close();
+      intervals.forEach(interval => clearInterval(interval));
+      server.close(() => {
+        console.log('Server closed');
+        process.kill(process.pid, signal);
+      });
+    }
+    process.once('SIGINT', closeGracefully);
+    process.once('SIGTERM', closeGracefully);
+
+  });
+
+}
+
+if(!process.env.VERCEL){
+  startServer();
+}
+
+export default app;

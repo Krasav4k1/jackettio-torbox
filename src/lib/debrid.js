@@ -2,9 +2,10 @@ import debridlink from "./debrid/debridlink.js";
 import alldebrid from "./debrid/alldebrid.js";
 import realdebrid from './debrid/realdebrid.js';
 import premiumize from './debrid/premiumize.js';
+import torbox from './debrid/torbox.js';
 export {ERROR} from './debrid/const.js';
 
-const debrid = {debridlink, alldebrid, realdebrid, premiumize};
+const debrid = {debridlink, alldebrid, realdebrid, premiumize, torbox};
 
 export function instance(userConfig){
 

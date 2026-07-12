@@ -4,7 +4,7 @@ Selfhosted Stremio addon that resolve streams using Jackett and Debrid. It seaml
 
 ## Features
 
-- Resolve streams using Jackett and Debrid (debrid-link, alldebrid, real-debrid)
+- Resolve streams using Jackett and Debrid (debrid-link, alldebrid, real-debrid, premiumize, torbox)
 - Public / Private trackers
 - TV packs priority
 - Sorting
@@ -108,6 +108,32 @@ docker run --env-file .env \
     -p 4000:4000 \
     -d arvida42/jackettio:latest
 ```
+
+## Deploy to Vercel
+
+The addon can run as a Vercel serverless function. A serverless entrypoint (`api/index.js`)
+and `vercel.json` are included; when running on Vercel the app skips the long-running HTTP
+server / background jobs and uses an in-memory cache instead of SQLite.
+
+Steps:
+
+1. Import this repository into a new Vercel project (Framework Preset: **Other**).
+2. Add the required environment variables in **Project Settings → Environment Variables**:
+   - `JACKETT_URL` — URL of your Jackett instance
+   - `JACKETT_API_KEY` — your Jackett API key
+   - (optional) any `ADDON_*` / `DEFAULT_*` settings from [config.js](src/lib/config.js)
+3. Deploy, then open `https://<your-project>.vercel.app/configure` to configure and install
+   the addon in Stremio.
+
+**Important caveats:**
+
+- **Jackett cannot run on Vercel.** You must host Jackett elsewhere (self-host / VPS) and point
+  `JACKETT_URL` at a publicly reachable instance.
+- **Cache is in-memory and ephemeral on Vercel.** It resets on cold starts. This only affects
+  speed, not correctness. To force the in-memory store outside Vercel, set `CACHE_STORE=memory`.
+- **Function time limit.** Vercel's Hobby plan caps serverless functions at 10s; heavy Jackett
+  searches can exceed this and time out. Use Vercel Pro (higher limits) or the Docker deployment
+  for reliable use with slow indexers.
 
 ## Configuration
 
