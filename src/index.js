@@ -70,25 +70,22 @@ async function singleAsGroup(id){
   return info ? {name: info.name, imdbId: null, poster: null, ids: [id]} : null;
 }
 
-// Gentle, GLOBALLY-throttled resolution of a private source's infohash from its .torrent link, so
-// the cached badge can show on first open without bursting the tracker (Cloudflare 1015). Runs one
-// download at a time with a short gap between them; result is '' on failure.
-const HASH_RESOLVE_GAP = 600;
-const HASH_RESOLVE_PER_GROUP = 5;
-const hashResolveLimit = pLimit(1);
-let lastHashResolveAt = 0;
-async function resolveInfoHash(info){
-  return hashResolveLimit(async () => {
-    const waitMs = Math.max(0, lastHashResolveAt + HASH_RESOLVE_GAP - Date.now());
-    if(waitMs)await wait(waitMs);
-    lastHashResolveAt = Date.now();
-    try {
-      const parsed = await promiseTimeout(getTorrentInfos({link: info.link, id: info.id, name: info.name, size: info.size, infoHash: info.infoHash, type: info.type}), 6000);
-      return (parsed && parsed.infoHash) || '';
-    }catch(err){
-      return '';
-    }
-  });
+// Time budget for the whole /stream request. Vercel Hobby kills the function at 10s, so we aim to
+// finish well under that: resolve private-source hashes sequentially (with a cooldown between
+// tracker downloads) only while budget remains, reserving time for the cache check + response.
+const STREAM_BUDGET_MS = 9000;      // target ceiling for the whole request
+const STREAM_STATUS_RESERVE_MS = 2000; // reserve for getHashesStatus + sending the response
+const HASH_RESOLVE_GAP_MS = 600;    // cooldown between .torrent downloads (tracker politeness)
+const HASH_RESOLVE_OP_MS = 4000;    // per-download cap
+
+// Resolve one private source's infohash from its .torrent link. '' on failure/timeout.
+async function resolveInfoHash(info, timeoutMs){
+  try {
+    const parsed = await promiseTimeout(getTorrentInfos({link: info.link, id: info.id, name: info.name, size: info.size, infoHash: info.infoHash, type: info.type}), timeoutMs);
+    return (parsed && parsed.infoHash) || '';
+  }catch(err){
+    return '';
+  }
 }
 
 const limiter = rateLimit({
@@ -520,6 +517,8 @@ app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
 
 app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
 
+  const reqStart = Date.now();
+
   try {
 
     // TorBox catalog items resolve to the download's video files instead of a Jackett search.
@@ -561,18 +560,22 @@ app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
         const info = await cache.get(`jackettio:torrent:${id}`);
         return info ? {id, info} : null;
       }))).filter(Boolean);
-      // Gently resolve a real infohash for private link-only sources so [TB+] can show on first
-      // open. Throttled (1 at a time, spaced) + capped per group, and persisted so it's one-time.
-      let resolveBudget = HASH_RESOLVE_PER_GROUP;
-      await Promise.all(items.map(x => (async () => {
-        if(x.info.infoHash || !x.info.link)return;
-        if(resolveBudget-- <= 0)return;
-        const hash = await resolveInfoHash(x.info);
+      // Gently resolve real infohashes for private link-only sources so [TB+] can show on first
+      // open — but sequentially, with a cooldown, and only while the request's time budget lasts,
+      // so the whole response stays under Vercel's timeout. Resolved hashes are persisted (one-time).
+      const deadline = reqStart + STREAM_BUDGET_MS - STREAM_STATUS_RESERVE_MS;
+      const pending = items.filter(x => !x.info.infoHash && x.info.link);
+      for(let i = 0; i < pending.length; i++){
+        const remaining = deadline - Date.now();
+        if(remaining < 700)break; // not enough time for another download; the rest fill in on play
+        if(i > 0)await wait(HASH_RESOLVE_GAP_MS);
+        const x = pending[i];
+        const hash = await resolveInfoHash(x.info, Math.min(HASH_RESOLVE_OP_MS, Math.max(500, deadline - Date.now())));
         if(hash){
           x.info.infoHash = hash;
           await cache.set(`jackettio:torrent:${x.id}`, x.info, {ttl: 3 * 24 * 3600});
         }
-      })()));
+      }
       // One batched cache/account check for all sources in the group.
       const statuses = await debridInstance.getHashesStatus(items.map(x => ({infoHash: x.info.infoHash, name: x.info.name}))).catch(() => items.map(() => ({cached: false, inAccount: false})));
       const sources = items.map((x, i) => ({...x, status: statuses[i] || {cached: false, inAccount: false}}));
