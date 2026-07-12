@@ -14,6 +14,7 @@ import {getIndexers} from './lib/jackett.js';
 import * as jackettio from "./lib/jackettio.js";
 import {cleanTorrentFolder, createTorrentFolder} from './lib/torrentInfos.js';
 import {bytesToSize} from './lib/util.js';
+import pLimit from 'p-limit';
 
 const converter = new showdown.Converter();
 const welcomeMessageHtml = config.welcomeMessage ? `${converter.makeHtml(config.welcomeMessage)}<div class="my-4 border-top border-secondary-subtle"></div>` : '';
@@ -154,14 +155,20 @@ app.get("/:userConfig/catalog/:type/:id.json", async(req, res) => {
     }
     const debridInstance = debrid.instance(Object.assign(userConfig, {ip: req.clientIp}));
     const items = await debridInstance.getCatalogItems();
-    const metas = items.map(item => ({
-      id: `torbox:${item.id}`,
-      type: 'movie',
-      name: item.name,
-      poster: `${getBaseUrl(req)}/icon`,
-      posterShape: 'square',
-      description: `TorBox download — ${bytesToSize(item.size)}`
-    }));
+    const placeholder = `${getBaseUrl(req)}/icon`;
+    // Best-effort poster lookup per item (cached), bounded concurrency to stay responsive.
+    const limit = pLimit(5);
+    const metas = await Promise.all(items.map(item => limit(async () => {
+      const poster = await meta.searchPoster(item.name).catch(() => null);
+      return {
+        id: `torbox:${item.id}`,
+        type: 'movie',
+        name: item.name,
+        poster: poster || placeholder,
+        posterShape: poster ? 'poster' : 'square',
+        description: `TorBox download — ${bytesToSize(item.size)}`
+      };
+    })));
     return respond(res, {metas});
   }catch(err){
     console.log('catalog', err);
@@ -182,15 +189,17 @@ app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
     if(!details){
       return respond(res, {meta: {}});
     }
-    const meta = {
+    const poster = await meta.searchPoster(details.name).catch(() => null);
+    const metaItem = {
       id: req.params.id,
       type: 'movie',
       name: details.name,
-      poster: `${getBaseUrl(req)}/icon`,
-      posterShape: 'square',
+      poster: poster || `${getBaseUrl(req)}/icon`,
+      posterShape: poster ? 'poster' : 'square',
+      background: poster || undefined,
       description: details.files.map(file => `${file.name} — ${bytesToSize(file.size)}`).join('\n')
     };
-    return respond(res, {meta});
+    return respond(res, {meta: metaItem});
   }catch(err){
     console.log('meta', err);
     return respond(res, {meta: {}});
