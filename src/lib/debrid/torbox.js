@@ -108,6 +108,15 @@ export default class TorBox {
     return createHash('md5').update(this.#apiKey).digest('hex');
   }
 
+  // Add a magnet and resolve the largest video file to a playable link (used by search catalogs).
+  async getMagnetDownload(magnet, infoHash){
+    const files = await this.getFilesFromMagnet(magnet, infoHash);
+    const videos = files.filter(file => isVideo(file.name));
+    const best = (videos.length ? videos : files).sort((a, b) => b.size - a.size)[0];
+    if(!best)throw new Error(ERROR.NOT_READY);
+    return this.getDownload(best);
+  }
+
   // Permanently delete a download from the user's TorBox account.
   async deleteTorrent(torrentId){
     const body = JSON.stringify({torrent_id: parseInt(torrentId), operation: 'delete'});

@@ -10,7 +10,7 @@ import path from 'path';
 import * as meta from './lib/meta.js';
 import * as icon from './lib/icon.js';
 import * as debrid from './lib/debrid.js';
-import {getIndexers} from './lib/jackett.js';
+import {getIndexers, searchTorrents} from './lib/jackett.js';
 import * as jackettio from "./lib/jackettio.js";
 import {cleanTorrentFolder, createTorrentFolder} from './lib/torrentInfos.js';
 import {bytesToSize} from './lib/util.js';
@@ -37,6 +37,13 @@ const noCache = (res) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
+};
+
+// Extract a lowercased btih infohash from a Jackett result (attr or magnet), or '' if absent.
+const itemInfoHash = (item) => {
+  if(item.infoHash)return `${item.infoHash}`.toLowerCase();
+  const match = `${item.magneturl || ''}`.match(/btih:([a-z0-9]+)/i);
+  return match ? match[1].toLowerCase() : '';
 };
 
 // URL of a generated fallback poster (cleaned title + year) for an item without real artwork.
@@ -171,71 +178,127 @@ app.get("/:userConfig?/manifest.json", async(req, res) => {
     // TorBox exposes the user's completed downloads as a browsable catalog.
     if(userConfig.debridId === 'torbox'){
       manifest.resources = ["stream", "catalog", "meta"];
-      manifest.idPrefixes = ["tt", "torbox:"];
+      manifest.idPrefixes = ["tt", "torbox:", "jackettio:"];
       manifest.catalogs = [
-        {type: "movie", id: "torbox-downloads", name: "TorBox Downloads"}
+        {type: "movie", id: "torbox-downloads", name: "TorBox Downloads"},
+        {type: "movie", id: "latest-4k", name: "Latest added 4k (3d)"}
       ];
     }
   }
   respond(res, manifest);
 });
 
-// Catalog: list the user's TorBox downloads as Stremio meta previews.
+// Catalog: TorBox downloads, and a Jackett "latest 4k" search. Metas get a best-effort poster
+// lookup (cached) with bounded concurrency to stay responsive.
 app.get("/:userConfig/catalog/:type/:id.json", async(req, res) => {
   noCache(res);
   try {
-    const userConfig = JSON.parse(atob(req.params.userConfig));
-    if(userConfig.debridId !== 'torbox' || req.params.id !== 'torbox-downloads'){
+    const userConfig = Object.assign(JSON.parse(atob(req.params.userConfig)), {ip: req.clientIp});
+    if(userConfig.debridId !== 'torbox'){
       return respond(res, {metas: []});
     }
-    const debridInstance = debrid.instance(Object.assign(userConfig, {ip: req.clientIp}));
-    const items = await debridInstance.getCatalogItems();
-    // Best-effort poster lookup per item (cached), bounded concurrency to stay responsive.
     const limit = pLimit(5);
-    const metas = await Promise.all(items.map(item => limit(async () => {
-      const poster = await meta.searchPoster(item.name).catch(() => null);
-      return {
+
+    if(req.params.id === 'torbox-downloads'){
+      const items = await debrid.instance(userConfig).getCatalogItems();
+      const metas = await Promise.all(items.map(item => limit(async () => ({
         id: `torbox:${item.id}`,
         type: 'movie',
         name: item.name,
-        poster: poster || generatedPosterUrl(req, item.name),
+        poster: (await meta.searchPoster(item.name).catch(() => null)) || generatedPosterUrl(req, item.name),
         posterShape: 'poster',
         description: `TorBox download — ${bytesToSize(item.size)}`
-      };
-    })));
-    return respond(res, {metas});
+      }))));
+      return respond(res, {metas});
+    }
+
+    if(req.params.id === 'latest-4k'){
+      // Jackett search "4k", keep items published in the last 3 days, sort by size desc, dedupe.
+      const cutoff = Date.now() - 3 * 24 * 3600 * 1000;
+      const sorted = (await searchTorrents({query: '4k'}))
+        .map(item => ({...item, infoHash: itemInfoHash(item)}))
+        .filter(item => item.infoHash && item.pubDate >= cutoff)
+        .sort((a, b) => b.size - a.size);
+      const seen = new Set();
+      const torrents = [];
+      for(const item of sorted){
+        if(seen.has(item.infoHash))continue;
+        seen.add(item.infoHash);
+        torrents.push(item);
+        if(torrents.length >= 50)break;
+      }
+      const metas = await Promise.all(torrents.map(item => limit(async () => {
+        // Stash the magnet so meta/stream can resolve the item without re-searching Jackett.
+        await cache.set(`jackettio:torrent:${item.infoHash}`, {
+          name: item.name,
+          size: item.size,
+          magnet: item.magneturl || `magnet:?xt=urn:btih:${item.infoHash}`
+        }, {ttl: 3 * 24 * 3600});
+        return {
+          id: `jackettio:${item.infoHash}`,
+          type: 'movie',
+          name: item.name,
+          poster: (await meta.searchPoster(item.name).catch(() => null)) || generatedPosterUrl(req, item.name),
+          posterShape: 'poster',
+          description: `${bytesToSize(item.size)} • 👥${item.seeders} • ⚙️${item.indexerId}`
+        };
+      })));
+      return respond(res, {metas});
+    }
+
+    return respond(res, {metas: []});
   }catch(err){
     console.log('catalog', err);
     return respond(res, {metas: []});
   }
 });
 
-// Meta: detail page for a single TorBox download (id: torbox:<torrentId>).
+// Meta: detail page for a TorBox download (torbox:<torrentId>) or a Jackett item (jackettio:<hash>).
 app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
   noCache(res);
   try {
-    const userConfig = JSON.parse(atob(req.params.userConfig));
-    if(userConfig.debridId !== 'torbox' || !req.params.id.startsWith('torbox:')){
+    const userConfig = Object.assign(JSON.parse(atob(req.params.userConfig)), {ip: req.clientIp});
+    if(userConfig.debridId !== 'torbox'){
       return respond(res, {meta: {}});
     }
-    const torrentId = req.params.id.split(':')[1];
-    const debridInstance = debrid.instance(Object.assign(userConfig, {ip: req.clientIp}));
-    const details = await debridInstance.getTorrentDetails(torrentId);
-    if(!details){
-      return respond(res, {meta: {}});
+
+    if(req.params.id.startsWith('torbox:')){
+      const torrentId = req.params.id.split(':')[1];
+      const details = await debrid.instance(userConfig).getTorrentDetails(torrentId);
+      if(!details){
+        return respond(res, {meta: {}});
+      }
+      const posterUrl = (await meta.searchPoster(details.name).catch(() => null)) || generatedPosterUrl(req, details.name);
+      return respond(res, {meta: {
+        id: req.params.id,
+        type: 'movie',
+        name: details.name,
+        poster: posterUrl,
+        posterShape: 'poster',
+        background: posterUrl,
+        description: details.files.map(file => `${file.name} — ${bytesToSize(file.size)}`).join('\n')
+      }});
     }
-    const poster = await meta.searchPoster(details.name).catch(() => null);
-    const posterUrl = poster || generatedPosterUrl(req, details.name);
-    const metaItem = {
-      id: req.params.id,
-      type: 'movie',
-      name: details.name,
-      poster: posterUrl,
-      posterShape: 'poster',
-      background: posterUrl,
-      description: details.files.map(file => `${file.name} — ${bytesToSize(file.size)}`).join('\n')
-    };
-    return respond(res, {meta: metaItem});
+
+    if(req.params.id.startsWith('jackettio:')){
+      const infoHash = req.params.id.split(':')[1];
+      const info = await cache.get(`jackettio:torrent:${infoHash}`);
+      if(!info){
+        return respond(res, {meta: {}});
+      }
+      const posterUrl = (await meta.searchPoster(info.name).catch(() => null)) || generatedPosterUrl(req, info.name);
+      return respond(res, {meta: {
+        id: req.params.id,
+        type: 'movie',
+        name: info.name,
+        poster: posterUrl,
+        posterShape: 'poster',
+        background: posterUrl,
+        description: `${bytesToSize(info.size)}`
+      }});
+    }
+
+    return respond(res, {meta: {}});
   }catch(err){
     console.log('meta', err);
     return respond(res, {meta: {}});
@@ -272,6 +335,17 @@ app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
       return respond(res, {streams});
     }
 
+    // Jackett search-catalog item: resolve the magnet through TorBox at play time.
+    if(req.params.id.startsWith('jackettio:')){
+      const infoHash = req.params.id.split(':')[1];
+      const info = await cache.get(`jackettio:torrent:${infoHash}`) || {name: infoHash, size: 0};
+      return respond(res, {streams: [{
+        name: `[TB] ${config.addonName}`,
+        title: `${info.name}\n${bytesToSize(info.size)}`,
+        url: `${getBaseUrl(req)}/${req.params.userConfig}/torbox/magnet/${infoHash}/${encodeURIComponent(info.name)}`
+      }]});
+    }
+
     const streams = await jackettio.getStreams(
       Object.assign(JSON.parse(atob(req.params.userConfig)), {ip: req.clientIp}),
       req.params.type,
@@ -297,6 +371,56 @@ app.get("/stream/:type/:id.json", async(req, res) => {
     title: `ℹ Kindly configure this addon to access streams.`,
     url: '#'
   }]});
+
+});
+
+// Resolve a Jackett search-catalog item: add its magnet to TorBox and play the largest video
+// file. Uncached torrents surface as NOT_READY (TorBox starts fetching) until ready, like /download.
+app.use('/:userConfig/torbox/magnet/:infoHash/:name?', async(req, res, next) => {
+
+  if (req.method !== 'GET' && req.method !== 'HEAD'){
+    return next();
+  }
+
+  try {
+
+    const userConfig = Object.assign(JSON.parse(atob(req.params.userConfig)), {ip: req.clientIp});
+    const debridInstance = debrid.instance(userConfig);
+    const info = await cache.get(`jackettio:torrent:${req.params.infoHash}`);
+    const magnet = (info && info.magnet) || `magnet:?xt=urn:btih:${req.params.infoHash}`;
+    const url = await debridInstance.getMagnetDownload(magnet, req.params.infoHash);
+
+    res.status(302);
+    res.set('location', url);
+    res.send('');
+
+  }catch(err){
+
+    console.log('torbox magnet', req.params.infoHash, err.message || err);
+
+    switch(err.message){
+      case debrid.ERROR.NOT_READY:
+        res.status(302);
+        res.set('location', `/videos/not_ready.mp4`);
+        res.send('');
+        break;
+      case debrid.ERROR.EXPIRED_API_KEY:
+        res.status(302);
+        res.set('location', `/videos/expired_api_key.mp4`);
+        res.send('');
+        break;
+      case debrid.ERROR.NOT_PREMIUM:
+        res.status(302);
+        res.set('location', `/videos/not_premium.mp4`);
+        res.send('');
+        break;
+      default:
+        res.status(302);
+        res.set('location', `/videos/error.mp4`);
+        res.send('');
+    }
+
+  }
 
 });
 

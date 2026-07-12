@@ -86,6 +86,25 @@ export async function searchEpisodeTorrents({indexer, name, year, season, episod
 
 }
 
+export async function searchTorrents({indexer, query}){
+
+  indexer = indexer || 'all';
+  const cacheKey = `jackettItems:2:search:${indexer}:${query}`;
+  let items = await cache.get(cacheKey);
+
+  if(!items){
+    const res = await jackettApi(
+      `/api/v2.0/indexers/${indexer}/results/torznab/api`,
+      {t: 'search', q: query}
+    );
+    items = res?.rss?.channel?.item || [];
+    cache.set(cacheKey, items, {ttl: items.length > 0 ? 3600 : 60});
+  }
+
+  return normalizeItems(items);
+
+}
+
 export async function getIndexers(){
 
   const res = await jackettApi(
@@ -139,6 +158,7 @@ function normalizeItems(items){
       id: crypto.createHash('sha1').update(item.guid).digest('hex'),
       size: parseInt(item.size),
       link: item.link,
+      pubDate: item.pubDate ? new Date(item.pubDate).getTime() : 0,
       seeders: parseInt(attr.seeders || 0),
       peers: parseInt(attr.peers || 0),
       infoHash: attr.infohash || '',
