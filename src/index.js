@@ -182,6 +182,7 @@ app.get("/:userConfig?/manifest.json", async(req, res) => {
       manifest.catalogs = [
         {type: "movie", id: "torbox-downloads", name: "TorBox Downloads"},
         {type: "movie", id: "latest-4k", name: "Latest added 4k (3d)"},
+        {type: "movie", id: "latest-4k-1w", name: "Latest added 4k (1w)"},
         // Search-only catalog: appears when the user searches in Stremio, runs a Jackett search.
         {
           type: "movie",
@@ -198,16 +199,16 @@ app.get("/:userConfig?/manifest.json", async(req, res) => {
 });
 
 // Run a Jackett search and turn the results into Stremio metas (id: jackettio:<jackettId>).
-// recentOnly keeps only the last 3 days; sortKey orders results (size or seeders). Each item's
-// resolution data is stashed so meta/stream can play it without re-searching. Poster lookups
-// (cached) run with bounded concurrency.
-async function buildJackettMetas(req, {query, recentOnly, sortKey}){
-  const cutoff = Date.now() - 3 * 24 * 3600 * 1000;
+// recentDays > 0 keeps only items published in that window; sortKey orders results (size or
+// seeders). Each item's resolution data is stashed so meta/stream can play it without
+// re-searching. Poster lookups (cached) run with bounded concurrency.
+async function buildJackettMetas(req, {query, recentDays, sortKey}){
+  const cutoff = Date.now() - (recentDays || 0) * 24 * 3600 * 1000;
   const raw = await searchTorrents({query});
   const resolvable = raw.filter(item => item.link || item.magneturl || item.infoHash);
-  const sorted = (recentOnly ? resolvable.filter(item => item.pubDate >= cutoff) : resolvable)
+  const sorted = (recentDays ? resolvable.filter(item => item.pubDate >= cutoff) : resolvable)
     .sort((a, b) => (b[sortKey] || 0) - (a[sortKey] || 0));
-  console.log(`jackett "${query}": ${raw.length} results, ${resolvable.length} resolvable${recentOnly ? `, ${sorted.length} within last 3 days` : ''}`);
+  console.log(`jackett "${query}": ${raw.length} results, ${resolvable.length} resolvable${recentDays ? `, ${sorted.length} within last ${recentDays}d` : ''}`);
 
   const seen = new Set();
   const torrents = [];
@@ -267,7 +268,13 @@ app.get("/:userConfig/catalog/:type/:id.json", async(req, res) => {
 
     if(req.params.id === 'latest-4k'){
       // Jackett search "4k", keep items published in the last 3 days, sort by size desc.
-      const metas = await buildJackettMetas(req, {query: '4k', recentOnly: true, sortKey: 'size'});
+      const metas = await buildJackettMetas(req, {query: '4k', recentDays: 3, sortKey: 'size'});
+      return respond(res, {metas});
+    }
+
+    if(req.params.id === 'latest-4k-1w'){
+      // Same as latest-4k but a 7-day window.
+      const metas = await buildJackettMetas(req, {query: '4k', recentDays: 7, sortKey: 'size'});
       return respond(res, {metas});
     }
 
@@ -287,7 +294,7 @@ app.get("/:userConfig/catalog/:type/:id/:extra.json", async(req, res) => {
     if(userConfig.debridId !== 'torbox' || req.params.id !== 'jackettio-search' || !query){
       return respond(res, {metas: []});
     }
-    const metas = await buildJackettMetas(req, {query, recentOnly: false, sortKey: 'seeders'});
+    const metas = await buildJackettMetas(req, {query, recentDays: 0, sortKey: 'seeders'});
     return respond(res, {metas});
   }catch(err){
     console.log('search catalog', err);
