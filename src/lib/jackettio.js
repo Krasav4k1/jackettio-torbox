@@ -153,9 +153,11 @@ async function getTorrents(userConfig, metaInfos, debridInstance){
       // const packsPromises = indexers.map(indexer => promiseTimeout(jackett.searchSeasonTorrents({...metaInfos, indexer: indexer.id}), indexerTimeoutSec*1000).catch(err => []));
       const packsPromises = indexers.map(indexer => timeoutIndexerSearch(indexer.id, jackett.searchSerieTorrents({...metaInfos, indexer: indexer.id}), indexerTimeoutSec*1000));
 
-      const episodesTorrents = [].concat(...(await Promise.all(episodesPromises))).filter(filterSearch);
+      const rawEpisodes = [].concat(...(await Promise.all(episodesPromises)));
+      const rawPacks = [].concat(...(await Promise.all(packsPromises)));
+      const episodesTorrents = rawEpisodes.filter(filterSearch);
       // const packsTorrents = [].concat(...(await Promise.all(packsPromises))).filter(torrent => filterSearch(torrent) && parseWords(torrent.name.toUpperCase()).includes(`S${numberPad(season)}`));
-      const packsTorrents = [].concat(...(await Promise.all(packsPromises))).filter(torrent => {
+      const packsTorrents = rawPacks.filter(torrent => {
         if(!filterSearch(torrent))return false;
         const words = parseWords(torrent.name.toLowerCase());
         const wordsStr = words.join(' ');
@@ -182,6 +184,18 @@ async function getTorrents(userConfig, metaInfos, debridInstance){
       torrents = [].concat(episodesTorrents, packsTorrents);
 
       console.log(`${stremioId} : ${torrents.length} torrents found in ${(new Date() - startDate) / 1000}s`);
+
+      // Diagnostic: when nothing is usable, say WHY — indexers returned nothing, vs. results existed
+      // but the quality/exclude filters dropped them all (the common "0 found" cause for 4k-only setups).
+      if(torrents.length === 0){
+        const rawTotal = rawEpisodes.length + rawPacks.length;
+        if(rawTotal > 0){
+          const qualitiesSeen = [...new Set([...rawEpisodes, ...rawPacks].map(t => t.quality))].sort((a, b) => a - b);
+          console.log(`${stremioId} : 0 usable of ${rawTotal} raw results — all dropped by filters. Your qualities=[${qualities.join(',')}], results have qualities=[${qualitiesSeen.join(',')}]. Enable the missing quality in /configure (or set DEFAULT_QUALITIES).`);
+        }else{
+          console.log(`${stremioId} : indexers returned 0 results for "${metaInfos.name}" S${numberPad(season)}E${numberPad(episode)} (cat=tv). The tracker may title the show differently or not expose it under TV search.`);
+        }
+      }
 
       const yearTorrents = torrents.filter(filterYear);
       if(yearTorrents.length)torrents = yearTorrents;
