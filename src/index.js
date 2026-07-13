@@ -744,29 +744,36 @@ app.use('/:userConfig/torbox/resolve/:id/:name?', async(req, res, next) => {
 
     const userConfig = Object.assign(JSON.parse(atob(req.params.userConfig)), {ip: req.clientIp});
     const debridInstance = debrid.instance(userConfig);
-    const raw = await cache.get(`jackettio:torrent:${req.params.id}`);
-    if(!raw){
-      throw new Error('Torrent info expired — reopen the catalog');
-    }
-    let url;
-    if(raw.magneturl){
-      // Public indexer: resolve straight from the magnet.
-      url = await debridInstance.getMagnetDownload(raw.magneturl, raw.infoHash);
-    }else{
-      // Private indexer (no magnet): download + parse the .torrent from the indexer link,
-      // then upload it to TorBox (or use the magnet if parsing yields a public one).
-      const infos = await getTorrentInfos({link: raw.link, id: raw.id, name: raw.name, size: raw.size, infoHash: raw.infoHash, type: raw.type});
-      // Persist the resolved hash so the cached badge can show next time — no extra download.
-      if(infos.infoHash && !raw.infoHash){
-        raw.infoHash = infos.infoHash;
-        await cache.set(`jackettio:torrent:${req.params.id}`, raw, {ttl: 3 * 24 * 3600});
+    // The video player re-hits this redirect frequently; resolving adds the torrent to TorBox and
+    // requests a link each time. Cache the resolved URL per user+source so repeats are free (and
+    // don't spam TorBox / the tracker).
+    const urlCacheKey = `torbox:resolveurl:${await debridInstance.getUserHash()}:${req.params.id}`;
+    let url = await cache.get(urlCacheKey);
+    if(!url){
+      const raw = await cache.get(`jackettio:torrent:${req.params.id}`);
+      if(!raw){
+        throw new Error('Torrent info expired — reopen the catalog');
       }
-      if(infos.magnetUrl){
-        url = await debridInstance.getMagnetDownload(infos.magnetUrl, infos.infoHash);
+      if(raw.magneturl){
+        // Public indexer: resolve straight from the magnet.
+        url = await debridInstance.getMagnetDownload(raw.magneturl, raw.infoHash);
       }else{
-        const buffer = await getTorrentFile(infos);
-        url = await debridInstance.getBufferDownload(buffer, infos.infoHash);
+        // Private indexer (no magnet): download + parse the .torrent from the indexer link,
+        // then upload it to TorBox (or use the magnet if parsing yields a public one).
+        const infos = await getTorrentInfos({link: raw.link, id: raw.id, name: raw.name, size: raw.size, infoHash: raw.infoHash, type: raw.type});
+        // Persist the resolved hash so the cached badge can show next time — no extra download.
+        if(infos.infoHash && !raw.infoHash){
+          raw.infoHash = infos.infoHash;
+          await cache.set(`jackettio:torrent:${req.params.id}`, raw, {ttl: 3 * 24 * 3600});
+        }
+        if(infos.magnetUrl){
+          url = await debridInstance.getMagnetDownload(infos.magnetUrl, infos.infoHash);
+        }else{
+          const buffer = await getTorrentFile(infos);
+          url = await debridInstance.getBufferDownload(buffer, infos.infoHash);
+        }
       }
+      if(url)await cache.set(urlCacheKey, url, {ttl: 3600});
     }
 
     res.status(302);
@@ -814,7 +821,14 @@ app.use('/:userConfig/torbox/play/:torrentId/:fileId/:name?', async(req, res, ne
 
     const userConfig = Object.assign(JSON.parse(atob(req.params.userConfig)), {ip: req.clientIp});
     const debridInstance = debrid.instance(userConfig);
-    const url = await debridInstance.getDownload({id: `${req.params.torrentId}:${req.params.fileId}`});
+    // Cache the resolved link per user+file — the player re-hits this redirect often and each miss
+    // is a TorBox requestdl call.
+    const urlCacheKey = `torbox:playurl:${await debridInstance.getUserHash()}:${req.params.torrentId}:${req.params.fileId}`;
+    let url = await cache.get(urlCacheKey);
+    if(!url){
+      url = await debridInstance.getDownload({id: `${req.params.torrentId}:${req.params.fileId}`});
+      if(url)await cache.set(urlCacheKey, url, {ttl: 3600});
+    }
 
     res.status(302);
     res.set('location', url);
