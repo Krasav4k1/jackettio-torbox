@@ -37,13 +37,19 @@ export function parseTitleFromName(name){
 // Best-effort lookup by name via Cinemeta's free search catalog (which yields both a poster and
 // the IMDb id) plus TMDB for a poster when configured. Returns {poster, imdbId} (either may be
 // null). Results (including misses) are cached to avoid repeated lookups on reload.
-export async function searchInfo(name){
+export async function searchInfo(name, hintType){
   const {title, year} = parseTitleFromName(name);
   if(!title)return {poster: null, imdbId: null, name: null};
 
-  const cacheKey = `info:${title.toLowerCase()}:${year || ''}`;
+  // Series and movies with the same title resolve to different entries, so key (and search) by the
+  // hinted type. Movie / unhinted lookups keep the original key so their cache isn't invalidated.
+  const cacheKey = `info:${hintType === 'series' ? 'series:' : ''}${title.toLowerCase()}:${year || ''}`;
   const cached = await cache.get(cacheKey);
   if(cached !== undefined)return cached;
+
+  // Search the hinted type first so a series doesn't get matched to a same-named movie (and vice
+  // versa). Unhinted lookups keep movie-first (the previous behaviour).
+  const searchTypes = hintType === 'series' ? ['series', 'movie'] : ['movie', 'series'];
 
   let poster = null;
   let imdbId = null;
@@ -53,7 +59,7 @@ export async function searchInfo(name){
     // then progressively drop trailing words (junk that survived parsing).
     outer:
     for(const query of titleQueries(title)){
-      for(const type of ['movie', 'series']){
+      for(const type of searchTypes){
         const metas = await promiseTimeout(searchCinemeta(type, query), 3000).catch(() => []);
         let match = metas[0];
         if(year){

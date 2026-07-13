@@ -51,7 +51,7 @@ const itemInfoHash = (item) => {
 const isSeriesName = (name) => /\b(s\d{1,2}e\d{1,3}|s\d{1,2}|\d{1,2}x\d{2}|season\s*\d+|complete\s+series)\b/i.test(`${name}`);
 
 // Stremio won't show streams for a `series` meta until it has a videos[] entry to click. Our
-// custom items are flat (one grouped set of source torrents, like a movie), so we expose a single
+// grouped Jackett items are flat (one set of source torrents, like a movie), so we expose a single
 // placeholder episode whose id routes back to the same stream handler (the `:1:1` suffix is
 // tolerated by the id parsing in the stream/meta routes).
 const seriesVideos = (id, name) => [{
@@ -61,6 +61,29 @@ const seriesVideos = (id, name) => [{
   episode: 1,
   released: new Date().toISOString()
 }];
+
+// Best-effort season/episode from a file/torrent name (SxxExx or NxNN), or null.
+const parseEpisode = (name) => {
+  const m = `${name}`.match(/s(\d{1,2})[ ._-]*e(\d{1,3})/i) || `${name}`.match(/\b(\d{1,2})x(\d{1,2})\b/);
+  return m ? {season: parseInt(m[1]), episode: parseInt(m[2])} : null;
+};
+
+// A TorBox download's video files as a Stremio series videos[]: one clickable episode per file, so
+// opening a series download lists every episode (not a single placeholder). Each video id carries
+// the file id (torbox:<torrentId>:<fileId>) so the stream route can resolve just that file.
+const torboxSeriesVideos = (torrentId, files) => files
+  .map((file, i) => {
+    const se = parseEpisode(file.name);
+    const fileId = `${file.id}`.split(':')[1];
+    return {
+      id: `torbox:${torrentId}:${fileId}`,
+      title: file.name,
+      season: se ? se.season : 1,
+      episode: se ? se.episode : i + 1,
+      released: new Date().toISOString()
+    };
+  })
+  .sort((a, b) => a.season - b.season || a.episode - b.episode);
 
 // URL of a generated fallback poster (cleaned title + year) for an item without real artwork.
 const generatedPosterUrl = (req, name) => {
@@ -72,8 +95,8 @@ const generatedPosterUrl = (req, name) => {
 
 // Artwork fields for a media title: a poster (real or generated) and the imdb_id (tt) when the
 // title resolves to a real IMDb entry. Spread into a meta/metaPreview object.
-async function artworkFor(req, name){
-  const info = await meta.searchInfo(name).catch(() => ({poster: null, imdbId: null}));
+async function artworkFor(req, name, hintType){
+  const info = await meta.searchInfo(name, hintType).catch(() => ({poster: null, imdbId: null}));
   return {
     poster: info.poster || generatedPosterUrl(req, name),
     ...(info.imdbId ? {imdb_id: info.imdbId} : {})
@@ -295,7 +318,7 @@ async function buildJackettMetas(req, {query, recentDays, sortKey, type = 'movie
   // One metadata lookup per preliminary group (cached), then merge groups sharing an imdb id.
   const limit = pLimit(5);
   const resolved = await Promise.all([...prelim.values()].map(g => limit(async () => {
-    const info = await meta.searchInfo(g.sample).catch(() => ({poster: null, imdbId: null, name: null}));
+    const info = await meta.searchInfo(g.sample, type).catch(() => ({poster: null, imdbId: null, name: null}));
     return {...g, info};
   })));
 
@@ -442,7 +465,7 @@ app.get("/:userConfig/catalog/:type/:id.json", async(req, res) => {
       // Same TorBox downloads, filtered to series (season/episode names), typed as series.
       const items = (await debrid.instance(userConfig).getCatalogItems()).filter(item => isSeriesName(item.name));
       const metas = await Promise.all(items.map(item => limit(async () => {
-        const art = await artworkFor(req, item.name);
+        const art = await artworkFor(req, item.name, 'series');
         return {
           id: `torbox:${item.id}`,
           type: 'series',
@@ -533,8 +556,7 @@ app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
       const art = await artworkFor(req, details.name);
       const description = details.files.map(file => `${file.name} — ${bytesToSize(file.size)}`).join('\n');
       if(req.params.type === 'series'){
-        // Series meta needs a videos[] entry to be streamable; the single episode lists every
-        // video file in the download (all episodes of a pack) via the same stream handler.
+        // One clickable episode per video file in the download, so every episode shows.
         return respond(res, {meta: {
           id: req.params.id,
           type: 'series',
@@ -543,7 +565,7 @@ app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
           posterShape: 'poster',
           background: art.poster,
           description,
-          videos: seriesVideos(req.params.id, details.name)
+          videos: torboxSeriesVideos(torrentId, details.files)
         }});
       }
       return respond(res, {meta: {
@@ -605,10 +627,16 @@ app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
     // TorBox catalog items resolve to the download's video files instead of a Jackett search.
     if(req.params.id.startsWith('torbox:')){
       const userConfig = Object.assign(JSON.parse(atob(req.params.userConfig)), {ip: req.clientIp});
-      const torrentId = req.params.id.split(':')[1];
+      const segs = req.params.id.slice('torbox:'.length).split(':');
+      const torrentId = segs[0];
+      // A series episode targets a specific file (torbox:<tid>:<fileId>); the movie / whole-download
+      // form (torbox:<tid>) lists every file. The legacy placeholder (torbox:<tid>:1:1) also lists all.
+      const fileId = segs.length === 2 ? segs[1] : null;
       const debridInstance = debrid.instance(userConfig);
       const details = await debridInstance.getTorrentDetails(torrentId);
-      const streams = (details ? details.files : []).map(file => {
+      let files = details ? details.files : [];
+      if(fileId !== null)files = files.filter(file => `${file.id}` === `${torrentId}:${fileId}`);
+      const streams = files.map(file => {
         const [tId, fId] = file.id.split(':');
         return {
           name: `[TB] ${config.addonName}`,
@@ -616,9 +644,9 @@ app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
           url: `${getBaseUrl(req)}/${req.params.userConfig}/torbox/play/${tId}/${fId}/${encodeURIComponent(file.name)}`
         };
       });
-      if(details){
-        // Action stream: playing it permanently deletes this download from TorBox. Stremio will
-        // fail to play the 204 response — that's expected; the deletion is the point.
+      // Whole-download view only (not a single-episode view) gets the delete action. Playing it
+      // permanently deletes this download from TorBox; Stremio fails to play the 204, which is fine.
+      if(details && fileId === null){
         streams.push({
           name: `🗑️ ${config.addonName}`,
           title: `Delete this download from TorBox`,
