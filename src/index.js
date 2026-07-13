@@ -46,6 +46,22 @@ const itemInfoHash = (item) => {
   return match ? match[1].toLowerCase() : '';
 };
 
+// Heuristic: does a torrent/download name look like a TV series (season/episode markers)?
+// Used only to feed the series-typed catalogs — the movie catalogs are unfiltered (unchanged).
+const isSeriesName = (name) => /\b(s\d{1,2}e\d{1,3}|s\d{1,2}|\d{1,2}x\d{2}|season\s*\d+|complete\s+series)\b/i.test(`${name}`);
+
+// Stremio won't show streams for a `series` meta until it has a videos[] entry to click. Our
+// custom items are flat (one grouped set of source torrents, like a movie), so we expose a single
+// placeholder episode whose id routes back to the same stream handler (the `:1:1` suffix is
+// tolerated by the id parsing in the stream/meta routes).
+const seriesVideos = (id, name) => [{
+  id: `${id}:1:1`,
+  title: name,
+  season: 1,
+  episode: 1,
+  released: new Date().toISOString()
+}];
+
 // URL of a generated fallback poster (cleaned title + year) for an item without real artwork.
 const generatedPosterUrl = (req, name) => {
   const {title, year} = meta.parseTitleFromName(name);
@@ -217,6 +233,8 @@ app.get("/:userConfig?/manifest.json", async(req, res) => {
       manifest.idPrefixes = ["tt", "torbox:", "jackettio:"];
       manifest.catalogs = [
         {type: "movie", id: "torbox-downloads", name: "TorBox Downloads"},
+        // Series counterpart of the TorBox downloads catalog (season/episode downloads).
+        {type: "series", id: "torbox-downloads-series", name: "TorBox Downloads"},
         {type: "movie", id: "latest-4k", name: "Latest added 4k (3d)"},
         {type: "movie", id: "latest-4k-1w", name: "Latest added 4k (1w)"},
         // Paginated (Stremio skip) date-sorted "latest 4k", 20 grouped items per page.
@@ -225,6 +243,15 @@ app.get("/:userConfig?/manifest.json", async(req, res) => {
         {
           type: "movie",
           id: "jackettio-search",
+          name: "Jackett",
+          extra: [{name: "search", isRequired: true}],
+          extraSupported: ["search"],
+          extraRequired: ["search"]
+        },
+        // Series counterpart of the search catalog, so a Stremio search also surfaces series.
+        {
+          type: "series",
+          id: "jackettio-search-series",
           name: "Jackett",
           extra: [{name: "search", isRequired: true}],
           extraSupported: ["search"],
@@ -239,13 +266,15 @@ app.get("/:userConfig?/manifest.json", async(req, res) => {
 // Run a Jackett search and turn the results into GROUPED Stremio metas: torrents for the same
 // title/movie are merged into one item (id: jackettio:<groupId>) whose streams are the individual
 // sources. recentDays > 0 keeps only items published in that window; sortKey orders results.
-async function buildJackettMetas(req, {query, recentDays, sortKey}){
+async function buildJackettMetas(req, {query, recentDays, sortKey, type = 'movie'}){
   const cutoff = Date.now() - (recentDays || 0) * 24 * 3600 * 1000;
   const raw = await searchTorrents({query});
-  const resolvable = raw.filter(item => item.link || item.magneturl || item.infoHash);
+  let resolvable = raw.filter(item => item.link || item.magneturl || item.infoHash);
+  // Series catalogs keep only season/episode-looking results; movie catalogs stay unfiltered.
+  if(type === 'series')resolvable = resolvable.filter(item => isSeriesName(item.name));
   const sorted = (recentDays ? resolvable.filter(item => item.pubDate >= cutoff) : resolvable)
     .sort((a, b) => (b[sortKey] || 0) - (a[sortKey] || 0) || `${a.name}`.localeCompare(`${b.name}`));
-  console.log(`jackett "${query}": ${raw.length} results, ${resolvable.length} resolvable${recentDays ? `, ${sorted.length} within last ${recentDays}d` : ''}`);
+  console.log(`jackett "${query}" (${type}): ${raw.length} results, ${resolvable.length} resolvable${recentDays ? `, ${sorted.length} within last ${recentDays}d` : ''}`);
 
   // Dedupe identical torrents, then group locally by parsed title+year (no network).
   const seen = new Set();
@@ -300,11 +329,12 @@ async function buildJackettMetas(req, {query, recentDays, sortKey}){
     }, {ttl: 3 * 24 * 3600});
     metas.push({
       id: `jackettio:${groupId}`,
-      type: 'movie',
+      type,
       name: g.name,
       poster: g.poster || generatedPosterUrl(req, g.name),
       posterShape: 'poster',
-      ...(g.imdbId ? {imdb_id: g.imdbId} : {}),
+      // Series metas are kept id-routed (no imdb_id) so Stremio opens OUR meta, not Cinemeta's.
+      ...(type !== 'series' && g.imdbId ? {imdb_id: g.imdbId} : {}),
       description: `${g.items.length} source${g.items.length > 1 ? 's' : ''}`
     });
   }
@@ -408,6 +438,23 @@ app.get("/:userConfig/catalog/:type/:id.json", async(req, res) => {
       return respond(res, {metas});
     }
 
+    if(req.params.id === 'torbox-downloads-series'){
+      // Same TorBox downloads, filtered to series (season/episode names), typed as series.
+      const items = (await debrid.instance(userConfig).getCatalogItems()).filter(item => isSeriesName(item.name));
+      const metas = await Promise.all(items.map(item => limit(async () => {
+        const art = await artworkFor(req, item.name);
+        return {
+          id: `torbox:${item.id}`,
+          type: 'series',
+          name: item.name,
+          poster: art.poster,
+          posterShape: 'poster',
+          description: `TorBox download — ${bytesToSize(item.size)}`
+        };
+      })));
+      return respond(res, {metas});
+    }
+
     if(req.params.id === 'latest-4k'){
       // Jackett search "4k", keep items published in the last 3 days, sort by size desc.
       const metas = await buildJackettMetas(req, {query: '4k', recentDays: 3, sortKey: 'size'});
@@ -450,6 +497,12 @@ app.get("/:userConfig/catalog/:type/:id/:extra.json", async(req, res) => {
       return respond(res, {metas: await buildJackettMetas(req, {query, recentDays: 0, sortKey: 'size'})});
     }
 
+    if(req.params.id === 'jackettio-search-series'){
+      const query = (params.get('search') || '').trim();
+      if(!query)return respond(res, {metas: []});
+      return respond(res, {metas: await buildJackettMetas(req, {query, recentDays: 0, sortKey: 'size', type: 'series'})});
+    }
+
     if(req.params.id === 'latest-4k-paged'){
       const skip = Math.max(0, parseInt(params.get('skip') || '0') || 0);
       return respond(res, {metas: await buildLatestPage(req, '4k', skip)});
@@ -478,6 +531,21 @@ app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
         return respond(res, {meta: {}});
       }
       const art = await artworkFor(req, details.name);
+      const description = details.files.map(file => `${file.name} — ${bytesToSize(file.size)}`).join('\n');
+      if(req.params.type === 'series'){
+        // Series meta needs a videos[] entry to be streamable; the single episode lists every
+        // video file in the download (all episodes of a pack) via the same stream handler.
+        return respond(res, {meta: {
+          id: req.params.id,
+          type: 'series',
+          name: details.name,
+          poster: art.poster,
+          posterShape: 'poster',
+          background: art.poster,
+          description,
+          videos: seriesVideos(req.params.id, details.name)
+        }});
+      }
       return respond(res, {meta: {
         id: req.params.id,
         type: 'movie',
@@ -485,7 +553,7 @@ app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
         ...art,
         posterShape: 'poster',
         background: art.poster,
-        description: details.files.map(file => `${file.name} — ${bytesToSize(file.size)}`).join('\n')
+        description
       }});
     }
 
@@ -496,6 +564,19 @@ app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
         return respond(res, {meta: {}});
       }
       const poster = group.poster || generatedPosterUrl(req, group.name);
+      const description = `${group.ids.length} source${group.ids.length > 1 ? 's' : ''} via TorBox`;
+      if(req.params.type === 'series'){
+        return respond(res, {meta: {
+          id: req.params.id,
+          type: 'series',
+          name: group.name,
+          poster,
+          posterShape: 'poster',
+          background: poster,
+          description,
+          videos: seriesVideos(req.params.id, group.name)
+        }});
+      }
       return respond(res, {meta: {
         id: req.params.id,
         type: 'movie',
@@ -504,7 +585,7 @@ app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
         posterShape: 'poster',
         background: poster,
         ...(group.imdbId ? {imdb_id: group.imdbId} : {}),
-        description: `${group.ids.length} source${group.ids.length > 1 ? 's' : ''} via TorBox`
+        description
       }});
     }
 
