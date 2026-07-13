@@ -2,19 +2,35 @@ import cacheManager from 'cache-manager';
 import config from './config.js';
 import {wait} from './util.js';
 
-// Store selection:
-// 1. An external Redis (Upstash / Vercel KV / self-host) when REDIS_URL or KV_URL is set — it
-//    persists across serverless cold starts AND redeploys, and is shared across all instances.
-// 2. Otherwise on serverless (Vercel), an in-memory store — ephemeral, but the filesystem is
-//    read-only/ephemeral and native sqlite3 is fragile there. Losing it is only a speed hit.
-// 3. Otherwise (self-host/Docker), SQLite on disk.
+// Store selection, in priority order:
+// 1. Upstash REST (UPSTASH_REDIS_REST_URL/TOKEN or Vercel KV's KV_REST_API_URL/TOKEN) — the
+//    recommended client for serverless (HTTP, no TCP connection limits). Auto-injected by the
+//    Upstash/Vercel integration, so it "just works" after a redeploy.
+// 2. A TCP Redis (REDIS_URL or KV_URL, e.g. rediss://…) via ioredis.
+// 3. On serverless (Vercel) with no Redis, an in-memory store — ephemeral (lost on cold
+//    start/redeploy, not shared across instances), but the FS is read-only and sqlite3 is fragile.
+// 4. Otherwise (self-host/Docker), SQLite on disk.
+// Options 1 & 2 persist across cold starts AND redeploys and are shared across all instances.
+const restUrl = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL || '';
+const restToken = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN || '';
 const redisUrl = process.env.REDIS_URL || process.env.KV_URL || '';
-const useMemoryStore = !redisUrl && (!!process.env.VERCEL || process.env.CACHE_STORE === 'memory');
+const useMemoryStore = !restUrl && !redisUrl && (!!process.env.VERCEL || process.env.CACHE_STORE === 'memory');
 
 let db = null;
 let cache;
 
-if(redisUrl){
+if(restUrl && restToken){
+  const {Redis} = await import('@upstash/redis');
+  const client = new Redis({url: restUrl, token: restToken});
+  // Minimal adapter — the app only uses get/set. @upstash/redis auto-serializes JSON; normalize a
+  // null miss to undefined so callers that check `=== undefined` behave like the other stores.
+  cache = {
+    async get(key){ const value = await client.get(key); return value === null || value === undefined ? undefined : value; },
+    async set(key, value, opts){ const ttl = opts && opts.ttl; return ttl ? client.set(key, value, {ex: ttl}) : client.set(key, value); },
+    async del(key){ return client.del(key); }
+  };
+  console.log('Cache store: upstash-rest');
+}else if(redisUrl){
   const Redis = (await import('ioredis')).default;
   const redisStore = (await import('cache-manager-ioredis')).default;
   const client = new Redis(redisUrl, {maxRetriesPerRequest: 3, enableReadyCheck: true, connectTimeout: 10000});

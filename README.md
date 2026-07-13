@@ -136,13 +136,19 @@ By default the cache is in-memory, which on Vercel lives only in a single warm s
 instance — it's lost on cold starts, redeploys, and isn't shared between instances (so a stream
 opened on a different instance than the catalog can come back empty). Point the addon at an
 external Redis and the cache (resolved hashes, catalog stashes, posters) **persists across cold
-starts & redeploys and is shared across all instances**:
+starts & redeploys and is shared across all instances**.
 
-- Set **`REDIS_URL`** (e.g. a free [Upstash Redis](https://upstash.com) `rediss://…` URL), **or**
-- add the **Vercel KV** integration — its `KV_URL` is picked up automatically.
+The addon auto-detects, in priority order:
 
-Redis takes priority over the in-memory / SQLite stores whenever `REDIS_URL` or `KV_URL` is set,
-on any host (Vercel, Docker, or local).
+1. **Upstash / Vercel KV (REST)** — `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN`, or
+   Vercel KV's `KV_REST_API_URL` + `KV_REST_API_TOKEN`. These are injected automatically when you
+   add the **Upstash** integration (Vercel → Storage / Integrations), so you just **redeploy** and
+   it's used. This REST client is the recommended one for serverless (no TCP connection limits).
+2. **TCP Redis** — `REDIS_URL` or `KV_URL` (e.g. a `rediss://…` string) via ioredis, for a
+   self-hosted Redis or if you prefer the TCP endpoint.
+
+Works on any host (Vercel, Docker, local). After adding the integration, **redeploy** and check
+the deployment's Runtime Logs for `Cache store: upstash-rest` (or `redis`) to confirm it's active.
 
 **Important caveats:**
 
