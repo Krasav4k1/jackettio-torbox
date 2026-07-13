@@ -59,6 +59,25 @@ function searchEpisodeFile(files, season, episode){
     || false;
 }
 
+// Does a torrent name mark the requested season? Tolerant of language and format: English
+// "Season 1"/"S01"/"S01-S03" AND Cyrillic "Сезон 1"/"1 сезон" (used by trackers like Toloka).
+// Operates on the raw name — parseWords() strips Cyrillic, so it can't be used here.
+function nameMatchesSeason(name, season){
+  const s = `${name}`.toLowerCase();
+  if(new RegExp(`\\bs0*${season}(?:\\b|e)`, 'i').test(s))return true;                        // s1 / s01 / s01e..
+  if(new RegExp(`(?:season|сезон|сезону|сезоні)\\s*0*${season}\\b`, 'i').test(s))return true; // season 1 / сезон 1
+  if(new RegExp(`\\b0*${season}\\s*(?:season|сезон)`, 'i').test(s))return true;               // 1 season / 1 сезон
+  const range = s.match(/s0*(\d+)\s*[-–—]?\s*s0*(\d+)/);
+  if(range && season >= parseInt(range[1]) && season <= parseInt(range[2]))return true;      // s01-s03
+  return false;
+}
+
+// Does the name mention ANY season marker? Distinguishes a single-season / whole-show pack (no
+// marker) from an explicit different-season pack.
+function nameMentionsAnySeason(name){
+  return /(?:season|сезон)\s*\d|\bs\d{1,2}(?:\b|e)|\d\s*(?:season|сезон)/i.test(`${name}`);
+}
+
 function getSlowIndexerStats(indexerId){
   slowIndexers[indexerId] = (slowIndexers[indexerId] || []).filter(item => new Date() - item.date < config.slowIndexerWindow);
   return {
@@ -183,15 +202,38 @@ async function getTorrents(userConfig, metaInfos, debridInstance){
 
       torrents = [].concat(episodesTorrents, packsTorrents);
 
+      // Fallback: strict episode/season matching found nothing, but the indexer DID return quality-
+      // passing results. This happens when packs are titled in another language (e.g. Toloka's
+      // Cyrillic "Сезон 1", which parseWords strips) or as a marker-less single-season pack. Recover
+      // any result that matches THIS season (language-tolerant) or carries no season marker at all,
+      // while still excluding results that explicitly belong to a DIFFERENT season. The right episode
+      // file is picked from the pack at play time.
+      if(torrents.length === 0){
+        const seen = new Set();
+        torrents = [...rawEpisodes, ...rawPacks].filter(torrent => {
+          if(!filterSearch(torrent))return false;
+          if(!(nameMatchesSeason(torrent.name, season) || !nameMentionsAnySeason(torrent.name)))return false;
+          const key = (torrent.infoHash || '') || torrent.id;
+          if(seen.has(key))return false;
+          seen.add(key);
+          return true;
+        });
+        if(torrents.length)console.log(`${stremioId} : strict match empty; language-tolerant season match recovered ${torrents.length} of ${rawEpisodes.length + rawPacks.length} raw results`);
+      }
+
       console.log(`${stremioId} : ${torrents.length} torrents found in ${(new Date() - startDate) / 1000}s`);
 
-      // Diagnostic: when nothing is usable, say WHY — indexers returned nothing, vs. results existed
-      // but the quality/exclude filters dropped them all (the common "0 found" cause for 4k-only setups).
+      // Diagnostic: still nothing usable — say WHY so it's actionable from the logs.
       if(torrents.length === 0){
-        const rawTotal = rawEpisodes.length + rawPacks.length;
-        if(rawTotal > 0){
-          const qualitiesSeen = [...new Set([...rawEpisodes, ...rawPacks].map(t => t.quality))].sort((a, b) => a - b);
-          console.log(`${stremioId} : 0 usable of ${rawTotal} raw results — all dropped by filters. Your qualities=[${qualities.join(',')}], results have qualities=[${qualitiesSeen.join(',')}]. Enable the missing quality in /configure (or set DEFAULT_QUALITIES).`);
+        const raw = [...rawEpisodes, ...rawPacks];
+        if(raw.length > 0){
+          const failedQuality = raw.filter(t => !qualities.includes(t.quality)).length;
+          if(failedQuality === raw.length){
+            const qualitiesSeen = [...new Set(raw.map(t => t.quality))].sort((a, b) => a - b);
+            console.log(`${stremioId} : all ${raw.length} results dropped by the quality filter. Your qualities=[${qualities.join(',')}], results have qualities=[${qualitiesSeen.join(',')}]. Enable the missing quality in /configure (or set DEFAULT_QUALITIES).`);
+          }else{
+            console.log(`${stremioId} : ${raw.length} results but none matched season ${season} for "${metaInfos.name}". Sample names: ${raw.slice(0, 6).map(t => t.name).join(' | ')}`);
+          }
         }else{
           console.log(`${stremioId} : indexers returned 0 results for "${metaInfos.name}" S${numberPad(season)}E${numberPad(episode)} (cat=tv). The tracker may title the show differently or not expose it under TV search.`);
         }
