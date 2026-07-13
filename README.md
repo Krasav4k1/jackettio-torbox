@@ -125,16 +125,33 @@ Steps:
 2. Add the required environment variables in **Project Settings → Environment Variables**:
    - `JACKETT_URL` — URL of your Jackett instance
    - `JACKETT_API_KEY` — your Jackett API key
+   - (recommended) `REDIS_URL` — a Redis connection string for a persistent, shared cache (see below)
    - (optional) any `ADDON_*` / `DEFAULT_*` settings from [config.js](src/lib/config.js)
 3. Deploy, then open `https://<your-project>.vercel.app/configure` to configure and install
    the addon in Stremio.
+
+### Persistent cache (recommended on Vercel)
+
+By default the cache is in-memory, which on Vercel lives only in a single warm serverless
+instance — it's lost on cold starts, redeploys, and isn't shared between instances (so a stream
+opened on a different instance than the catalog can come back empty). Point the addon at an
+external Redis and the cache (resolved hashes, catalog stashes, posters) **persists across cold
+starts & redeploys and is shared across all instances**:
+
+- Set **`REDIS_URL`** (e.g. a free [Upstash Redis](https://upstash.com) `rediss://…` URL), **or**
+- add the **Vercel KV** integration — its `KV_URL` is picked up automatically.
+
+Redis takes priority over the in-memory / SQLite stores whenever `REDIS_URL` or `KV_URL` is set,
+on any host (Vercel, Docker, or local).
 
 **Important caveats:**
 
 - **Jackett cannot run on Vercel.** You must host Jackett elsewhere (self-host / VPS) and point
   `JACKETT_URL` at a publicly reachable instance.
-- **Cache is in-memory and ephemeral on Vercel.** It resets on cold starts. This only affects
-  speed, not correctness. To force the in-memory store outside Vercel, set `CACHE_STORE=memory`.
+- **Without Redis, the cache is in-memory and ephemeral on Vercel** — it resets on cold starts and
+  isn't shared across instances (affects speed, and occasionally a freshly-opened item may need the
+  catalog reopened). Set `REDIS_URL`/`KV_URL` to make it persistent. `CACHE_STORE=memory` forces
+  the in-memory store outside Vercel.
 - **Function time limit.** Vercel's Hobby plan caps serverless functions at 10s; heavy Jackett
   searches can exceed this and time out. Use Vercel Pro (higher limits) or the Docker deployment
   for reliable use with slow indexers.

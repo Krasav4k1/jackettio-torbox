@@ -2,15 +2,33 @@ import cacheManager from 'cache-manager';
 import config from './config.js';
 import {wait} from './util.js';
 
-// On serverless platforms (Vercel) the filesystem is ephemeral/read-only and the native
-// sqlite3 module is fragile, so fall back to an in-memory store. The cache is only a speed
-// optimization, so losing it between cold starts is harmless. Self-host/Docker keeps SQLite.
-const useMemoryStore = !!process.env.VERCEL || process.env.CACHE_STORE === 'memory';
+// Store selection:
+// 1. An external Redis (Upstash / Vercel KV / self-host) when REDIS_URL or KV_URL is set — it
+//    persists across serverless cold starts AND redeploys, and is shared across all instances.
+// 2. Otherwise on serverless (Vercel), an in-memory store — ephemeral, but the filesystem is
+//    read-only/ephemeral and native sqlite3 is fragile there. Losing it is only a speed hit.
+// 3. Otherwise (self-host/Docker), SQLite on disk.
+const redisUrl = process.env.REDIS_URL || process.env.KV_URL || '';
+const useMemoryStore = !redisUrl && (!!process.env.VERCEL || process.env.CACHE_STORE === 'memory');
 
 let db = null;
 let cache;
 
-if(useMemoryStore){
+if(redisUrl){
+  const Redis = (await import('ioredis')).default;
+  const redisStore = (await import('cache-manager-ioredis')).default;
+  const client = new Redis(redisUrl, {maxRetriesPerRequest: 3, enableReadyCheck: true, connectTimeout: 10000});
+  client.on('error', err => console.log(`cache redis error: ${err.message}`));
+  cache = await cacheManager.caching({store: redisStore, redisInstance: client, ttl: 86400});
+  // Redis returns null on a miss; memory/sqlite return undefined. Normalize so callers that check
+  // `=== undefined` (e.g. the negative-cache in meta.searchInfo) behave the same on every store.
+  const rawGet = cache.get.bind(cache);
+  cache.get = async (...args) => {
+    const value = await rawGet(...args);
+    return value === null ? undefined : value;
+  };
+  console.log('Cache store: redis');
+}else if(useMemoryStore){
   cache = await cacheManager.caching({store: 'memory', max: 5000, ttl: 86400});
 }else{
   const sqlite3 = (await import('sqlite3')).default;
