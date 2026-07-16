@@ -12,6 +12,13 @@
       }
       [v-cloak] { display: none; }
     </style>
+    <!-- Vercel Speed Insights (HTML integration — no bundler in this app). Collects Web Vitals for
+         this configure page. Served by Vercel's edge at /_vercel/speed-insights/script.js when
+         Speed Insights is enabled for the project; a no-op elsewhere. -->
+    <script>
+      window.si = window.si || function () { (window.siq = window.siq || []).push(arguments); };
+    </script>
+    <script defer src="/_vercel/speed-insights/script.js"></script>
   </head>
   <body id="app">
     <div class="container my-5" v-cloak>
