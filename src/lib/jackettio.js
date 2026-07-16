@@ -410,6 +410,16 @@ function getFile(files, type, season, episode){
   }
 }
 
+// Pick the episode file (same choice as getFile / playback) and flag whether its name STRONGLY
+// matches the requested SxxExx / NxNN — so the stream list can show ✅ (identified) vs ⚠️ (best
+// guess / first file). Empty files (e.g. an unparsed public magnet) → no file, not confident.
+function matchEpisodeFile(files, season, episode){
+  const chosen = getFile(files || [], 'series', season, episode) || null;
+  if(!chosen)return {file: null, exact: false};
+  const exactRe = new RegExp(`(?:s0*${season}[ ._-]*e0*${episode}|\\b${season}x0*${episode})\\b`, 'i');
+  return {file: chosen, exact: exactRe.test(chosen.name || '')};
+}
+
 export async function getStreams(userConfig, type, stremioId, publicUrl){
 
   userConfig = await mergeDefaultUserConfig(userConfig);
@@ -426,15 +436,37 @@ export async function getStreams(userConfig, type, stremioId, publicUrl){
   }
 
   return torrents.map(torrent => {
-    const file = getFile(torrent.infos.files || [], type, season, episode) || {};
+    const files = torrent.infos.files || [];
     const quality = torrent.quality > 0 ? config.qualities.find(q => q.value == torrent.quality).label : '';
-    const rows = [torrent.name];
-    if(type == 'series' && file.name)rows.push(file.name);
-    if(torrent.infoText)rows.push(`ℹ️ ${torrent.infoText}`);
-    rows.push([`💾${bytesToSize(file.size || torrent.size)}`, `👥${torrent.seeders}`, `⚙️${torrent.indexerId}`, ...(torrent.languages || []).map(language => language.emoji)].join(' '));
-    if(torrent.progress && !torrent.isCached){
-      rows.push(`⬇️ ${torrent.progress.percent}% ${bytesToSize(torrent.progress.speed)}/s`);
+    const totalSize = torrent.infos.size > 0 ? torrent.infos.size : torrent.size;
+    const meta = [`👥${torrent.seeders}`, `⚙️${torrent.indexerId}`, ...(torrent.languages || []).map(language => language.emoji)].join(' ');
+
+    let file;
+    const rows = [];
+
+    if(type == 'series'){
+      // Status line on top: ✅/⚠️ episode marker + episode size / whole-torrent size, so it's easy to
+      // confirm the right episode and see how big the single file vs. the full download is.
+      const {file: epFile, exact} = matchEpisodeFile(files, season, episode);
+      file = epFile || {};
+      const isPack = files.length > 1 && file.size > 0 && file.size < totalSize;
+      const sizeStr = file.size > 0
+        ? (isPack ? `${bytesToSize(file.size)} / ${bytesToSize(totalSize)}` : bytesToSize(file.size))
+        : bytesToSize(totalSize);
+      rows.push(`${exact ? '✅' : '⚠️'} S${numberPad(season)}E${numberPad(episode)} · ${sizeStr}`);
+      if(file.name)rows.push(file.name);
+      rows.push(meta);
+      if(torrent.infoText)rows.push(`ℹ️ ${torrent.infoText}`);
+      if(torrent.progress && !torrent.isCached)rows.push(`⬇️ ${torrent.progress.percent}% ${bytesToSize(torrent.progress.speed)}/s`);
+      rows.push(torrent.name);
+    }else{
+      file = getFile(files, type, season, episode) || {};
+      rows.push(torrent.name);
+      if(torrent.infoText)rows.push(`ℹ️ ${torrent.infoText}`);
+      rows.push([`💾${bytesToSize(file.size || torrent.size)}`, meta].join(' '));
+      if(torrent.progress && !torrent.isCached)rows.push(`⬇️ ${torrent.progress.percent}% ${bytesToSize(torrent.progress.speed)}/s`);
     }
+
     return {
       name: `[${debridInstance.shortName}${torrent.isCached ? '+' : ''}] ${userConfig.enableMediaFlow ? '🕵🏼‍♂️ ' : ''}${config.addonName} ${quality}`,
       title: rows.join("\n"),

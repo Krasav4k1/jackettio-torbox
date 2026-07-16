@@ -13,7 +13,7 @@ import * as debrid from './lib/debrid.js';
 import {getIndexers, searchTorrents} from './lib/jackett.js';
 import * as jackettio from "./lib/jackettio.js";
 import {cleanTorrentFolder, createTorrentFolder, get as getTorrentInfos, getTorrentFile} from './lib/torrentInfos.js';
-import {bytesToSize, promiseTimeout, wait} from './lib/util.js';
+import {bytesToSize, numberPad, promiseTimeout, wait} from './lib/util.js';
 import {generatePoster, generatePosterSvg} from './lib/poster.js';
 import pLimit from 'p-limit';
 
@@ -635,12 +635,25 @@ app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
       const debridInstance = debrid.instance(userConfig);
       const details = await debridInstance.getTorrentDetails(torrentId);
       let files = details ? details.files : [];
+      const totalSize = details ? details.size : 0;
+      const isPack = files.length > 1;
       if(fileId !== null)files = files.filter(file => `${file.id}` === `${torrentId}:${fileId}`);
       const streams = files.map(file => {
         const [tId, fId] = file.id.split(':');
+        // Single-episode view (series): status line on top — S01E01 · episode size / whole-download
+        // size — so it matches the native series streams and shows both sizes.
+        let title;
+        if(fileId !== null){
+          const se = parseEpisode(file.name);
+          const label = se ? `🎬 S${numberPad(se.season)}E${numberPad(se.episode)} · ` : '🎬 ';
+          const sizeStr = isPack && file.size < totalSize ? `${bytesToSize(file.size)} / ${bytesToSize(totalSize)}` : bytesToSize(file.size);
+          title = `${label}${sizeStr}\n${file.name}`;
+        }else{
+          title = `${file.name}\n${bytesToSize(file.size)}`;
+        }
         return {
           name: `[TB] ${config.addonName}`,
-          title: `${file.name}\n${bytesToSize(file.size)}`,
+          title,
           url: `${getBaseUrl(req)}/${req.params.userConfig}/torbox/play/${tId}/${fId}/${encodeURIComponent(file.name)}`
         };
       });
