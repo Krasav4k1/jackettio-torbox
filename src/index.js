@@ -8,6 +8,7 @@ import config from './lib/config.js';
 import cache, {vacuum as vacuumCache, clean as cleanCache} from './lib/cache.js';
 import path from 'path';
 import * as meta from './lib/meta.js';
+import * as rating from './lib/rating.js';
 import * as icon from './lib/icon.js';
 import * as debrid from './lib/debrid.js';
 import {getIndexers, searchTorrents} from './lib/jackett.js';
@@ -638,25 +639,37 @@ app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
       const totalSize = details ? details.size : 0;
       const isPack = files.length > 1;
       if(fileId !== null)files = files.filter(file => `${file.id}` === `${torrentId}:${fileId}`);
-      const streams = files.map(file => {
+      // Resolve the download's IMDb id (from its name) once so streams can show ⭐/🍅/Ⓜ️ ratings.
+      // The whole-download / movie view reuses one show-level rating; a single-episode view gets a
+      // per-episode rating below.
+      const info = details ? await meta.searchInfo(details.name, req.params.type).catch(() => ({imdbId: null})) : {imdbId: null};
+      const showImdb = info.imdbId;
+      const sharedRating = showImdb && fileId === null
+        ? await rating.getRatingLine({imdbId: showImdb, type: req.params.type}).catch(() => '')
+        : '';
+      const streams = await Promise.all(files.map(async file => {
         const [tId, fId] = file.id.split(':');
         // Single-episode view (series): status line on top — S01E01 · episode size / whole-download
         // size — so it matches the native series streams and shows both sizes.
-        let title;
+        const rows = [];
+        let ratingLine = sharedRating;
         if(fileId !== null){
           const se = parseEpisode(file.name);
+          if(showImdb)ratingLine = await rating.getRatingLine({imdbId: showImdb, type: 'series', season: se ? se.season : null, episode: se ? se.episode : null}).catch(() => '');
           const label = se ? `🎬 S${numberPad(se.season)}E${numberPad(se.episode)} · ` : '🎬 ';
           const sizeStr = isPack && file.size < totalSize ? `${bytesToSize(file.size)} / ${bytesToSize(totalSize)}` : bytesToSize(file.size);
-          title = `${label}${sizeStr}\n${file.name}`;
+          if(ratingLine)rows.push(ratingLine);
+          rows.push(`${label}${sizeStr}`, file.name);
         }else{
-          title = `${file.name}\n${bytesToSize(file.size)}`;
+          if(ratingLine)rows.push(ratingLine);
+          rows.push(file.name, bytesToSize(file.size));
         }
         return {
           name: `[TB] ${config.addonName}`,
-          title,
+          title: rows.join('\n'),
           url: `${getBaseUrl(req)}/${req.params.userConfig}/torbox/play/${tId}/${fId}/${encodeURIComponent(file.name)}`
         };
-      });
+      }));
       // Whole-download view only (not a single-episode view) gets the delete action. Playing it
       // permanently deletes this download from TorBox; Stremio fails to play the 204, which is fine.
       if(details && fileId === null){
@@ -703,8 +716,12 @@ app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
       const sources = items.map((x, i) => ({...x, status: statuses[i] || {cached: false, inAccount: false}}));
       // Cached first, then largest.
       sources.sort((a, b) => (b.status.cached ? 1 : 0) - (a.status.cached ? 1 : 0) || (b.info.size - a.info.size));
+      // Show-level rating for the whole group (browse groups have no per-episode context).
+      const ratingLine = group.imdbId ? await rating.getRatingLine({imdbId: group.imdbId, type: req.params.type}).catch(() => '') : '';
       const streams = sources.map(({id, info, status}) => {
-        const rows = [info.name];
+        const rows = [];
+        if(ratingLine)rows.push(ratingLine);
+        rows.push(info.name);
         if(status.inAccount)rows.push('📁 Your media');
         rows.push(bytesToSize(info.size));
         return {

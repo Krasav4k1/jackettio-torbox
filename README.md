@@ -176,8 +176,10 @@ Stream titles can show a rating line on top, e.g. `⭐ 7.6  🍅 85%  Ⓜ️ 67`
   **per-episode IMDb ratings** for series — all in one request. Rotten Tomatoes / Metacritic only
   rate movies and whole titles, so episode lines typically show the IMDb rating only.
 
-Ratings are cached for a day and fetched in parallel with the torrent search, so they add no
-latency. Works on any host (Vercel, Docker, local) — just set `OMDB_API_KEY`.
+Ratings appear across all flows: streams opened from any Stremio catalog (native), the **TorBox
+Downloads** catalog (per-episode for series), and the **Jackett search** catalog (show-level).
+They're cached for a day and, in the native flow, fetched in parallel with the torrent search, so
+they add no latency. Works on any host (Vercel, Docker, local) — just set `OMDB_API_KEY`.
 
 ## Configuration
 
