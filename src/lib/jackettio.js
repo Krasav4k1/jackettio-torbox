@@ -305,7 +305,12 @@ async function getTorrents(userConfig, metaInfos, debridInstance){
         }
       
         const progress = await debridInstance.getProgressTorrents(torrents);
-        torrents.forEach(torrent => torrent.progress = progress[torrent.infos.infoHash] || null);
+        torrents.forEach(torrent => {
+          torrent.progress = progress[torrent.infos.infoHash] || null;
+          // Present in the debrid account's list (getProgressTorrents covers the whole account list)
+          // → it's already "my media", so streams can flag it (📁).
+          torrent.inAccount = !!progress[torrent.infos.infoHash];
+        });
 
       }catch(err){
 
@@ -468,7 +473,7 @@ export async function getStreams(userConfig, type, stremioId, publicUrl){
     }
 
     return {
-      name: `[${debridInstance.shortName}${torrent.isCached ? '+' : ''}] ${userConfig.enableMediaFlow ? '🕵🏼‍♂️ ' : ''}${config.addonName} ${quality}`,
+      name: `[${debridInstance.shortName}${torrent.isCached ? '+' : ''}${torrent.inAccount ? '📁' : ''}] ${userConfig.enableMediaFlow ? '🕵🏼‍♂️ ' : ''}${config.addonName} ${quality}`,
       title: rows.join("\n"),
       url: torrent.disabled ? '#' : `${publicUrl}/${btoa(JSON.stringify(userConfig))}/download/${type}/${stremioId}/${torrent.id}/${file.name || torrent.name}`
     };

@@ -708,7 +708,7 @@ app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
         if(status.inAccount)rows.push('📁 Your media');
         rows.push(bytesToSize(info.size));
         return {
-          name: `[TB${status.cached ? '+' : ''}] ${config.addonName}`,
+          name: `[TB${status.cached ? '+' : ''}${status.inAccount ? '📁' : ''}] ${config.addonName}`,
           title: rows.join('\n'),
           url: `${getBaseUrl(req)}/${req.params.userConfig}/torbox/resolve/${id}/${encodeURIComponent(info.name)}`
         };

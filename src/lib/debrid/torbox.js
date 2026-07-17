@@ -53,7 +53,8 @@ export default class TorBox {
   async getProgressTorrents(torrents){
     const res = await this.#request('GET', '/torrents/mylist', {query: {bypass_cache: 'true'}});
     return (res.data || []).reduce((progress, torrent) => {
-      progress[torrent.hash] = {
+      // Key by lowercased hash so lookups against the (lowercased) parsed infoHash match reliably.
+      progress[`${torrent.hash || ''}`.toLowerCase()] = {
         // TorBox progress is a ratio between 0 and 1
         percent: Math.round((torrent.progress || 0) * 100),
         speed: torrent.download_speed || 0
