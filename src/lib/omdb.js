@@ -48,6 +48,7 @@ function normalize(d){
   }
   return {
     name: clean(d.Title),
+    imdbId: clean(d.imdbID),
     type: d.Type === 'series' ? 'series' : 'movie',
     year: clean(d.Year),
     released: clean(d.Released),   // e.g. "05 May 2017"
@@ -69,25 +70,31 @@ function normalize(d){
 }
 
 // Map an OMDb record onto Stremio meta fields. Cast / director / writer / genres are emitted via
-// the `links` array (the `cast`/`director`/`genres` fields are deprecated in the Stremio meta
-// spec, and modern clients only render these from `links`); the rest go on their own fields.
-// Only includes fields that are present, so it can be spread into a meta object safely.
+// the `links` array (the modern, non-deprecated path that current clients render) AND via the
+// legacy `cast`/`director`/`writer`/`genres` fields for older clients — this mirrors what Stremio's
+// own Cinemeta addon does, including the exact link categories it uses ("Cast", "Directors",
+// "Writers", "Genres", "imdb"), which every client is known to render.
 // See https://github.com/Stremio/stremio-addon-sdk/blob/master/docs/api/responses/meta.md
 export function stremioMetaFields(record){
   if(!record)return {};
   const out = {};
+  const search = name => `stremio:///search?search=${encodeURIComponent(name)}`;
 
-  // A Stremio meta Link: {name, category, url}. Grouped by category on the detail page; the url is
-  // an internal search link so the actor/director/etc. is clickable.
+  // Links: {name, category, url}, grouped by category on the detail page. Order/categories match
+  // Cinemeta so the sections render the same way.
   const links = [];
-  const addLinks = (names, category) => {
-    for(const name of names)links.push({name, category, url: `stremio:///search?search=${encodeURIComponent(name)}`});
-  };
-  addLinks(record.cast, 'actor');
-  addLinks(record.director, 'director');
-  addLinks(record.writer, 'writer');
-  addLinks(record.genres, 'genre');
+  if(record.imdbRating && record.imdbId)links.push({name: record.imdbRating, category: 'imdb', url: `https://www.imdb.com/title/${record.imdbId}`});
+  for(const name of record.genres)links.push({name, category: 'Genres', url: search(name)});
+  for(const name of record.director)links.push({name, category: 'Directors', url: search(name)});
+  for(const name of record.writer)links.push({name, category: 'Writers', url: search(name)});
+  for(const name of record.cast)links.push({name, category: 'Cast', url: search(name)});
   if(links.length)out.links = links;
+
+  // Legacy fields (deprecated but still rendered by older clients).
+  if(record.cast.length)out.cast = record.cast;
+  if(record.director.length)out.director = record.director;
+  if(record.writer.length)out.writer = record.writer;
+  if(record.genres.length)out.genres = record.genres;
 
   if(record.runtime)out.runtime = record.runtime;
   if(record.imdbRating)out.imdbRating = record.imdbRating;

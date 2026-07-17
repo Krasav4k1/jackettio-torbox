@@ -593,6 +593,7 @@ app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
       const record = group.imdbId ? await omdb.getById(group.imdbId).catch(() => null) : null;
       const enrich = omdb.stremioMetaFields(record);
       const ratingLine = group.imdbId ? await rating.getRatingLine({imdbId: group.imdbId, type: req.params.type}).catch(() => '') : '';
+      console.log(`meta ${req.params.id}: imdbId=${group.imdbId || '-'} omdb=${record ? 'hit' : 'miss'} links=${(enrich.links || []).length}`);
       const poster = group.poster || (record && record.poster) || generatedPosterUrl(req, group.name);
       // Description: "N sources via TorBox, <ratings>," then the plot beneath.
       const sourceLine = `${group.ids.length} source${group.ids.length > 1 ? 's' : ''} via TorBox`;
