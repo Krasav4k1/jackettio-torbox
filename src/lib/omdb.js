@@ -68,16 +68,27 @@ function normalize(d){
   };
 }
 
-// Map an OMDb record onto Stremio meta fields (cast, director, writer, genres, runtime, released,
-// imdbRating, country, awards, releaseInfo). Only includes fields that are present, so it can be
-// spread into a meta object without clobbering existing values with empty ones.
+// Map an OMDb record onto Stremio meta fields. Cast / director / writer / genres are emitted via
+// the `links` array (the `cast`/`director`/`genres` fields are deprecated in the Stremio meta
+// spec, and modern clients only render these from `links`); the rest go on their own fields.
+// Only includes fields that are present, so it can be spread into a meta object safely.
+// See https://github.com/Stremio/stremio-addon-sdk/blob/master/docs/api/responses/meta.md
 export function stremioMetaFields(record){
   if(!record)return {};
   const out = {};
-  if(record.cast.length)out.cast = record.cast;
-  if(record.director.length)out.director = record.director;
-  if(record.writer.length)out.writer = record.writer;
-  if(record.genres.length)out.genres = record.genres;
+
+  // A Stremio meta Link: {name, category, url}. Grouped by category on the detail page; the url is
+  // an internal search link so the actor/director/etc. is clickable.
+  const links = [];
+  const addLinks = (names, category) => {
+    for(const name of names)links.push({name, category, url: `stremio:///search?search=${encodeURIComponent(name)}`});
+  };
+  addLinks(record.cast, 'actor');
+  addLinks(record.director, 'director');
+  addLinks(record.writer, 'writer');
+  addLinks(record.genres, 'genre');
+  if(links.length)out.links = links;
+
   if(record.runtime)out.runtime = record.runtime;
   if(record.imdbRating)out.imdbRating = record.imdbRating;
   if(record.country)out.country = record.country;

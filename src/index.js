@@ -587,14 +587,17 @@ app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
       if(!group){
         return respond(res, {meta: {}});
       }
-      // Enrich the detail page with OMDb data (plot, cast, director, genres, released, runtime,
-      // awards, imdbRating) when we have an IMDb id and OMDb is configured. Best-effort.
+      // Enrich the detail page with OMDb data (plot, cast/director/writer/genres via links,
+      // released, runtime, awards, imdbRating) when we have an IMDb id and OMDb is configured.
+      // Best-effort; both lookups share the same cached OMDb record, so it's one request.
       const record = group.imdbId ? await omdb.getById(group.imdbId).catch(() => null) : null;
       const enrich = omdb.stremioMetaFields(record);
+      const ratingLine = group.imdbId ? await rating.getRatingLine({imdbId: group.imdbId, type: req.params.type}).catch(() => '') : '';
       const poster = group.poster || (record && record.poster) || generatedPosterUrl(req, group.name);
-      // Lead with the "N sources via TorBox" line, then the plot when we have one.
+      // Description: "N sources via TorBox, <ratings>," then the plot beneath.
       const sourceLine = `${group.ids.length} source${group.ids.length > 1 ? 's' : ''} via TorBox`;
-      const description = record && record.plot ? `${sourceLine}\n\n${record.plot}` : sourceLine;
+      const header = ratingLine ? `${sourceLine}, ${ratingLine}` : sourceLine;
+      const description = record && record.plot ? `${header},\n${record.plot}` : header;
       if(req.params.type === 'series'){
         return respond(res, {meta: {
           id: req.params.id,
