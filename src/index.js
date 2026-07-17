@@ -592,9 +592,9 @@ app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
       const record = group.imdbId ? await omdb.getById(group.imdbId).catch(() => null) : null;
       const enrich = omdb.stremioMetaFields(record);
       const poster = group.poster || (record && record.poster) || generatedPosterUrl(req, group.name);
-      // Keep the "N sources via TorBox" line, but lead with the plot when we have one.
+      // Lead with the "N sources via TorBox" line, then the plot when we have one.
       const sourceLine = `${group.ids.length} source${group.ids.length > 1 ? 's' : ''} via TorBox`;
-      const description = record && record.plot ? `${record.plot}\n\n${sourceLine}` : sourceLine;
+      const description = record && record.plot ? `${sourceLine}\n\n${record.plot}` : sourceLine;
       if(req.params.type === 'series'){
         return respond(res, {meta: {
           id: req.params.id,
