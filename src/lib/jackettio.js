@@ -484,7 +484,10 @@ export async function getStreams(userConfig, type, stremioId, publicUrl){
     return {
       name: `[${debridInstance.shortName}${torrent.isCached ? '+' : ''}${torrent.inAccount ? '📁' : ''}] ${userConfig.enableMediaFlow ? '🕵🏼‍♂️ ' : ''}${config.addonName} ${quality}`,
       title: rows.join("\n"),
-      url: torrent.disabled ? '#' : `${publicUrl}/${btoa(JSON.stringify(userConfig))}/download/${type}/${stremioId}/${torrent.id}/${file.name || torrent.name}`
+      url: torrent.disabled ? '#' : `${publicUrl}/${btoa(JSON.stringify(userConfig))}/download/${type}/${stremioId}/${torrent.id}/${file.name || torrent.name}`,
+      // Binge auto-play: streams of the same quality across episodes share a bingeGroup, so Stremio
+      // keeps playing the next episode from the same source/quality without re-prompting.
+      behaviorHints: {bingeGroup: `${config.addonId}|${debridInstance.shortName}|${torrent.quality}`}
     };
   });
 

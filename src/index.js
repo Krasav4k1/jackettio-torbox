@@ -680,7 +680,10 @@ app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
         return {
           name: `[TB] ${config.addonName}`,
           title: rows.join('\n'),
-          url: `${getBaseUrl(req)}/${req.params.userConfig}/torbox/play/${tId}/${fId}/${encodeURIComponent(file.name)}`
+          url: `${getBaseUrl(req)}/${req.params.userConfig}/torbox/play/${tId}/${fId}/${encodeURIComponent(file.name)}`,
+          // Binge auto-play: every episode of this download shares a bingeGroup keyed on the
+          // download id, so Stremio auto-continues to the next episode from the same download.
+          behaviorHints: {bingeGroup: `${config.addonId}|torbox|${torrentId}`}
         };
       }));
       // Whole-download view only (not a single-episode view) gets the delete action. Playing it
