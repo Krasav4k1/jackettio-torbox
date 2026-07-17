@@ -468,11 +468,13 @@ export async function getStreams(userConfig, type, stremioId, publicUrl){
         ? (isPack ? `${bytesToSize(file.size)} / ${bytesToSize(totalSize)}` : bytesToSize(file.size))
         : bytesToSize(totalSize);
       rows.push(`${exact ? '✅' : '⚠️'} S${numberPad(season)}E${numberPad(episode)} · ${sizeStr}`);
-      if(file.name)rows.push(file.name);
+      // Single identifier: the episode file name (it already carries quality/source/langs). Fall
+      // back to the torrent/release name only when there's no per-file name, so we don't show the
+      // file name and the near-identical torrent name on two separate lines.
+      rows.push(file.name || torrent.name);
       rows.push(meta);
       if(torrent.infoText)rows.push(`ℹ️ ${torrent.infoText}`);
       if(torrent.progress && !torrent.isCached)rows.push(`⬇️ ${torrent.progress.percent}% ${bytesToSize(torrent.progress.speed)}/s`);
-      rows.push(torrent.name);
     }else{
       file = getFile(files, type, season, episode) || {};
       rows.push(torrent.name);
