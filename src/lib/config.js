@@ -8,7 +8,11 @@ export default {
   // Jacket API key
   jackettApiKey: process.env.JACKETT_API_KEY || '',
   //  The Movie Database Access Token. Configure to use TMDB rather than cinemeta.
-  tmdbAccessToken: process.env.TMDB_ACCESS_TOKEN || '', 
+  tmdbAccessToken: process.env.TMDB_ACCESS_TOKEN || '',
+  // OMDb API key (free: https://www.omdbapi.com/apikey.aspx). When set, stream titles show the
+  // IMDb rating + Rotten Tomatoes score, with per-episode IMDb ratings for series. Without it,
+  // titles fall back to Cinemeta's free movie/show-level IMDb rating (no Rotten Tomatoes).
+  omdbApiKey: process.env.OMDB_API_KEY || '',
   // Data folder for cache database, torrent files ... Must be persistent in production
   dataFolder: process.env.DATA_FOLDER || '/tmp',
   // Enable localtunnel feature

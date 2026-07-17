@@ -127,6 +127,7 @@ Steps:
    - `JACKETT_URL` — URL of your Jackett instance
    - `JACKETT_API_KEY` — your Jackett API key
    - (recommended) `REDIS_URL` — a Redis connection string for a persistent, shared cache (see below)
+   - (optional) `OMDB_API_KEY` — show IMDb + Rotten Tomatoes ratings in stream titles (see below)
    - (optional) any `ADDON_*` / `DEFAULT_*` settings from [config.js](src/lib/config.js)
 3. Deploy, then open `https://<your-project>.vercel.app/configure` to configure and install
    the addon in Stremio.
@@ -162,6 +163,19 @@ the deployment's Runtime Logs for `Cache store: upstash-rest` (or `redis`) to co
 - **Function time limit.** Vercel's Hobby plan caps serverless functions at 10s; heavy Jackett
   searches can exceed this and time out. Use Vercel Pro (higher limits) or the Docker deployment
   for reliable use with slow indexers.
+
+### Ratings in stream titles (optional)
+
+Stream titles can show a rating line on top, e.g. `⭐ 8.7  🍅 88%`:
+
+- **Without any key** — the free Cinemeta feed provides the **movie / show-level IMDb rating**
+  (the same value shows for every episode of a series; no Rotten Tomatoes).
+- **With `OMDB_API_KEY`** — [OMDb](https://www.omdbapi.com/apikey.aspx) (free tier, 1000
+  requests/day) adds the **Rotten Tomatoes** score and **per-episode IMDb ratings** for series.
+  Rotten Tomatoes only rates movies and whole titles, so episode lines show the IMDb rating only.
+
+Ratings are cached for a day and fetched in parallel with the torrent search, so they add no
+latency. Works on any host (Vercel, Docker, local) — just set `OMDB_API_KEY`.
 
 ## Configuration
 

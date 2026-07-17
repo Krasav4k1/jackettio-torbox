@@ -4,6 +4,7 @@ import config from './config.js';
 import cache from './cache.js';
 import { updateUserConfigWithMediaFlowIp, applyMediaflowProxyIfNeeded } from './mediaflowProxy.js';
 import * as meta from './meta.js';
+import * as rating from './rating.js';
 import * as jackett from './jackett.js';
 import * as debrid from './debrid.js';
 import * as torrentInfos from './torrentInfos.js';
@@ -433,12 +434,18 @@ export async function getStreams(userConfig, type, stremioId, publicUrl){
 
   let metaInfos = await getMetaInfos(type, stremioId, userConfig.metaLanguage);
 
+  // Fetch the IMDb / Rotten Tomatoes rating in parallel with the (slow) torrent search so it adds
+  // no latency; it's the same for every stream of this title/episode, so we fetch it once.
+  const ratingPromise = rating.getRatingLine({imdbId: metaInfos.imdb_id || metaInfos.id, type, season, episode}).catch(() => '');
+
   const torrents = await getTorrents(userConfig, metaInfos, debridInstance);
 
   // Prepare next expisode torrents list
   if(type == 'series'){
     prepareNextEpisode({...userConfig, forceCacheNextEpisode: false}, metaInfos, debridInstance);
   }
+
+  const ratingLine = await ratingPromise;
 
   return torrents.map(torrent => {
     const files = torrent.infos.files || [];
@@ -448,6 +455,8 @@ export async function getStreams(userConfig, type, stremioId, publicUrl){
 
     let file;
     const rows = [];
+    // Rating on top (⭐ IMDb / 🍅 Rotten Tomatoes), same for every stream of this title/episode.
+    if(ratingLine)rows.push(ratingLine);
 
     if(type == 'series'){
       // Status line on top: ✅/⚠️ episode marker + episode size / whole-torrent size, so it's easy to
