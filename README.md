@@ -181,6 +181,10 @@ Downloads** catalog (per-episode for series), and the **Jackett search** catalog
 They're cached for a day and, in the native flow, fetched in parallel with the torrent search, so
 they add no latency. Works on any host (Vercel, Docker, local) — just set `OMDB_API_KEY`.
 
+With `OMDB_API_KEY` set, the **detail pages** of the Jackett search and "Latest added" catalogs are
+also enriched with OMDb metadata — plot, cast, director, writer, genres, runtime, release date,
+awards and IMDb rating — while still showing the "N sources via TorBox" line.
+
 ## Configuration
 
 Jackettio is designed for selfhosted, whether for personal or public use. As a server owner, effortlessly configure many settings with environement variables.

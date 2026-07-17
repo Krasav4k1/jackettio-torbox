@@ -9,6 +9,7 @@ import cache, {vacuum as vacuumCache, clean as cleanCache} from './lib/cache.js'
 import path from 'path';
 import * as meta from './lib/meta.js';
 import * as rating from './lib/rating.js';
+import * as omdb from './lib/omdb.js';
 import * as icon from './lib/icon.js';
 import * as debrid from './lib/debrid.js';
 import {getIndexers, searchTorrents} from './lib/jackett.js';
@@ -586,8 +587,14 @@ app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
       if(!group){
         return respond(res, {meta: {}});
       }
-      const poster = group.poster || generatedPosterUrl(req, group.name);
-      const description = `${group.ids.length} source${group.ids.length > 1 ? 's' : ''} via TorBox`;
+      // Enrich the detail page with OMDb data (plot, cast, director, genres, released, runtime,
+      // awards, imdbRating) when we have an IMDb id and OMDb is configured. Best-effort.
+      const record = group.imdbId ? await omdb.getById(group.imdbId).catch(() => null) : null;
+      const enrich = omdb.stremioMetaFields(record);
+      const poster = group.poster || (record && record.poster) || generatedPosterUrl(req, group.name);
+      // Keep the "N sources via TorBox" line, but lead with the plot when we have one.
+      const sourceLine = `${group.ids.length} source${group.ids.length > 1 ? 's' : ''} via TorBox`;
+      const description = record && record.plot ? `${record.plot}\n\n${sourceLine}` : sourceLine;
       if(req.params.type === 'series'){
         return respond(res, {meta: {
           id: req.params.id,
@@ -596,6 +603,7 @@ app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
           poster,
           posterShape: 'poster',
           background: poster,
+          ...enrich,
           description,
           videos: seriesVideos(req.params.id, group.name)
         }});
@@ -608,6 +616,7 @@ app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
         posterShape: 'poster',
         background: poster,
         ...(group.imdbId ? {imdb_id: group.imdbId} : {}),
+        ...enrich,
         description
       }});
     }
