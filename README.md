@@ -166,13 +166,15 @@ the deployment's Runtime Logs for `Cache store: upstash-rest` (or `redis`) to co
 
 ### Ratings in stream titles (optional)
 
-Stream titles can show a rating line on top, e.g. `⭐ 8.7  🍅 88%`:
+Stream titles can show a rating line on top, e.g. `⭐ 7.6  🍅 85%  Ⓜ️ 67`
+(IMDb / Rotten Tomatoes / Metacritic):
 
 - **Without any key** — the free Cinemeta feed provides the **movie / show-level IMDb rating**
-  (the same value shows for every episode of a series; no Rotten Tomatoes).
+  (the same value shows for every episode of a series; no Rotten Tomatoes or Metacritic).
 - **With `OMDB_API_KEY`** — [OMDb](https://www.omdbapi.com/apikey.aspx) (free tier, 1000
-  requests/day) adds the **Rotten Tomatoes** score and **per-episode IMDb ratings** for series.
-  Rotten Tomatoes only rates movies and whole titles, so episode lines show the IMDb rating only.
+  requests/day) adds the **Rotten Tomatoes** (critics) and **Metacritic** scores plus
+  **per-episode IMDb ratings** for series — all in one request. Rotten Tomatoes / Metacritic only
+  rate movies and whole titles, so episode lines typically show the IMDb rating only.
 
 Ratings are cached for a day and fetched in parallel with the torrent search, so they add no
 latency. Works on any host (Vercel, Docker, local) — just set `OMDB_API_KEY`.

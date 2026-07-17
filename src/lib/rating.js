@@ -16,19 +16,22 @@ export async function getRatingLine({imdbId, type, season, episode}){
   if(!imdbId.startsWith('tt'))return '';
 
   const isEpisode = type === 'series' && season != null && episode != null;
-  const cacheKey = `rating:1:${imdbId}${isEpisode ? `:${season}:${episode}` : ''}`;
+  const cacheKey = `rating:2:${imdbId}${isEpisode ? `:${season}:${episode}` : ''}`;
   const cached = await cache.get(cacheKey);
   if(cached !== undefined)return cached;
 
   let imdb = null;
   let rt = null;
+  let mc = null;
 
-  // Prefer OMDb when configured — the only free source with Rotten Tomatoes and per-episode IMDb.
+  // Prefer OMDb when configured — the only free source with Rotten Tomatoes / Metacritic and
+  // per-episode IMDb. All three ratings come back in the single OMDb call.
   if(config.omdbApiKey){
     const omdb = await promiseTimeout(fetchOmdb({imdbId, season, episode, isEpisode}), 3000).catch(() => null);
     if(omdb){
       imdb = omdb.imdb;
       rt = omdb.rt;
+      mc = omdb.mc;
     }
   }
 
@@ -37,16 +40,17 @@ export async function getRatingLine({imdbId, type, season, episode}){
     imdb = await promiseTimeout(fetchCinemetaRating({imdbId, type}), 3000).catch(() => null);
   }
 
-  const line = formatRating(imdb, rt);
+  const line = formatRating(imdb, rt, mc);
   // Ratings drift slowly; cache for a day (misses cached too, so we don't refetch on every open).
   await cache.set(cacheKey, line, {ttl: 3600 * 24});
   return line;
 }
 
-function formatRating(imdb, rt){
+function formatRating(imdb, rt, mc){
   const parts = [];
-  if(imdb)parts.push(`⭐ ${imdb}`);
-  if(rt)parts.push(`🍅 ${rt}`);
+  if(imdb)parts.push(`⭐ ${imdb}`);        // IMDb (audience, /10)
+  if(rt)parts.push(`🍅 ${rt}`);            // Rotten Tomatoes (critics, %)
+  if(mc)parts.push(`Ⓜ️ ${mc}`);            // Metacritic (weighted critics, /100)
   return parts.join('  ');
 }
 
@@ -68,7 +72,9 @@ async function fetchOmdb({imdbId, season, episode, isEpisode}){
       break;
     }
   }
-  return {imdb, rt};
+  // Metacritic comes as a top-level "Metascore" (e.g. "67") — show it as-is (out of 100).
+  const mc = data.Metascore && data.Metascore !== 'N/A' ? data.Metascore : null;
+  return {imdb, rt, mc};
 }
 
 async function fetchCinemetaRating({imdbId, type}){
