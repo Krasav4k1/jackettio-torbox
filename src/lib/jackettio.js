@@ -426,6 +426,63 @@ function matchEpisodeFile(files, season, episode){
   return {file: chosen, exact: exactRe.test(chosen.name || '')};
 }
 
+// Normalize a title for loose matching (drop punctuation/spacing/case).
+function normalizeTitle(name){
+  return `${name || ''}`.toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+// Build streams from the user's own debrid downloads that match this title (and, for series, this
+// exact episode file), so an already-downloaded item shows up on the normal (imdb) movie/series
+// page — no need to open the "TorBox Downloads" catalog. Synchronous over a pre-fetched download
+// list. Each returned stream carries a private `_hash` so the caller can dedupe it against the
+// Jackett results. Returns [] when nothing matches.
+function buildAccountStreams({userConfig, type, metaInfos, downloads, debridInstance, publicUrl, ratingLine}){
+  const wantTitle = normalizeTitle(metaInfos.name);
+  if(!downloads.length || wantTitle.length < 3)return [];
+
+  const {season, episode} = metaInfos;
+  const cfg = btoa(JSON.stringify(userConfig));
+  const streams = [];
+
+  for(const download of downloads){
+    if(!normalizeTitle(download.name).includes(wantTitle))continue; // different title
+
+    let file;
+    if(type == 'series'){
+      const {file: epFile, exact} = matchEpisodeFile(download.files, season, episode);
+      if(!epFile || !exact)continue; // right show, but not this exact episode
+      file = epFile;
+    }else{
+      file = (download.files || []).slice().sort((a, b) => b.size - a.size)[0];
+      if(!file)continue;
+    }
+
+    const [torrentId, fileId] = file.id.split(':');
+    const rows = [];
+    if(ratingLine)rows.push(ratingLine);
+    if(type == 'series'){
+      const isPack = (download.files || []).length > 1;
+      const sizeStr = isPack ? `${bytesToSize(file.size)} / ${bytesToSize(download.size)}` : bytesToSize(file.size);
+      rows.push(`✅ S${numberPad(season)}E${numberPad(episode)} · ${sizeStr}`);
+      rows.push(file.name);
+      rows.push('📁 In your TorBox');
+    }else{
+      rows.push(file.name);
+      rows.push(`💾${bytesToSize(file.size)} 📁 In your TorBox`);
+    }
+
+    streams.push({
+      _hash: download.hash || '',
+      name: `[${debridInstance.shortName}+📁] ${userConfig.enableMediaFlow ? '🕵🏼‍♂️ ' : ''}${config.addonName}`,
+      title: rows.join('\n'),
+      url: `${publicUrl}/${cfg}/torbox/play/${torrentId}/${fileId}/${encodeURIComponent(file.name)}`,
+      // Same download continues to the next episode (binge auto-play).
+      behaviorHints: {bingeGroup: `${config.addonId}|torbox|${torrentId}`}
+    });
+  }
+  return streams;
+}
+
 export async function getStreams(userConfig, type, stremioId, publicUrl){
 
   userConfig = await mergeDefaultUserConfig(userConfig);
@@ -438,16 +495,31 @@ export async function getStreams(userConfig, type, stremioId, publicUrl){
   // no latency; it's the same for every stream of this title/episode, so we fetch it once.
   const ratingPromise = rating.getRatingLine({imdbId: metaInfos.imdb_id || metaInfos.id, type, season, episode}).catch(() => '');
 
-  const torrents = await getTorrents(userConfig, metaInfos, debridInstance);
+  // Also fetch the user's own debrid downloads in parallel, so an already-downloaded item can be
+  // shown as a stream here (feature-detected; TorBox only, [] for others / on error).
+  const downloadsPromise = (typeof debridInstance.getMyDownloads === 'function' ? debridInstance.getMyDownloads() : Promise.resolve([])).catch(() => []);
+
+  // A Jackett failure must not hide the user's own downloads — fall back to account-only streams.
+  let torrents = [];
+  try {
+    torrents = await getTorrents(userConfig, metaInfos, debridInstance);
+  }catch(err){
+    console.log(`${stremioId} : torrent search failed (${err.message}); account streams only`);
+  }
 
   // Prepare next expisode torrents list
   if(type == 'series'){
-    prepareNextEpisode({...userConfig, forceCacheNextEpisode: false}, metaInfos, debridInstance);
+    prepareNextEpisode({...userConfig, forceCacheNextEpisode: false}, metaInfos, debridInstance).catch(() => {});
   }
 
   const ratingLine = await ratingPromise;
 
-  return torrents.map(torrent => {
+  // Streams from the user's own TorBox downloads that match this title/episode, shown first (they
+  // play instantly — already downloaded). Dedupe any Jackett torrent that is the same release.
+  const accountStreams = buildAccountStreams({userConfig, type, metaInfos, downloads: await downloadsPromise, debridInstance, publicUrl, ratingLine});
+  const accountHashes = new Set(accountStreams.map(stream => stream._hash).filter(Boolean));
+
+  const jackettStreams = torrents.filter(torrent => !accountHashes.has(torrent.infos.infoHash)).map(torrent => {
     const files = torrent.infos.files || [];
     const quality = torrent.quality > 0 ? config.qualities.find(q => q.value == torrent.quality).label : '';
     const totalSize = torrent.infos.size > 0 ? torrent.infos.size : torrent.size;
@@ -492,6 +564,9 @@ export async function getStreams(userConfig, type, stremioId, publicUrl){
       behaviorHints: {bingeGroup: `${config.addonId}|${debridInstance.shortName}|${torrent.quality}`}
     };
   });
+
+  // Account streams first (instant), then Jackett results. Strip the internal `_hash` field.
+  return [...accountStreams.map(({_hash, ...stream}) => stream), ...jackettStreams];
 
 }
 

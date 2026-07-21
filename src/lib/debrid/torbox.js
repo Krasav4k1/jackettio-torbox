@@ -158,6 +158,27 @@ export default class TorBox {
       });
   }
 
+  // The user's completed downloads with their video files and infohash. Used to surface an
+  // already-downloaded title as a stream on the normal (imdb) movie/series page. One /mylist call.
+  async getMyDownloads(){
+    const res = await this.#request('GET', '/torrents/mylist', {query: {bypass_cache: 'true'}});
+    return (res.data || [])
+      .filter(torrent => torrent.download_present && (torrent.files || []).some(file => isVideo(file.name)))
+      .map(torrent => ({
+        id: torrent.id,
+        name: torrent.name,
+        size: torrent.size,
+        hash: `${torrent.hash || ''}`.toLowerCase(),
+        files: (torrent.files || [])
+          .filter(file => isVideo(file.name))
+          .map(file => ({
+            id: `${torrent.id}:${file.id}`,
+            name: file.short_name || basename(file.name),
+            size: file.size
+          }))
+      }));
+  }
+
   // Batch status for many sources: which infohashes are instantly cached on TorBox, and which are
   // already in the user's account (by hash, or by name for private items with no infohash). One
   // /checkcached (batch) + one /mylist for the whole list. Returns {cached, inAccount} per source,
