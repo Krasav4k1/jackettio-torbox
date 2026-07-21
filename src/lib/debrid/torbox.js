@@ -3,6 +3,10 @@ import {basename} from 'path';
 import {ERROR} from './const.js';
 import {isVideo} from '../util.js';
 
+// A file name that looks like a TV episode (SxxExx or NxNN). Used to detect series downloads by
+// their contents, not just the top-level name (a season pack often has no SxxExx in its title).
+const EPISODE_FILE_RE = /s\d{1,2}[ ._-]*e\d{1,3}|\b\d{1,2}x\d{2}\b/i;
+
 export default class TorBox {
 
   static id = 'torbox';
@@ -140,11 +144,18 @@ export default class TorBox {
     return (res.data || [])
       .filter(torrent => torrent.download_present && (torrent.files || []).some(file => isVideo(file.name)))
       .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
-      .map(torrent => ({
-        id: torrent.id,
-        name: torrent.name,
-        size: torrent.size
-      }));
+      .map(torrent => {
+        const videoFiles = (torrent.files || []).filter(file => isVideo(file.name));
+        return {
+          id: torrent.id,
+          name: torrent.name,
+          size: torrent.size,
+          videoCount: videoFiles.length,
+          // How many video files look like episodes — lets the catalog detect a series pack even
+          // when the download's own name has no season/episode markers.
+          episodeCount: videoFiles.filter(file => EPISODE_FILE_RE.test(file.name)).length
+        };
+      });
   }
 
   // Batch status for many sources: which infohashes are instantly cached on TorBox, and which are

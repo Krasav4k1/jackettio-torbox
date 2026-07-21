@@ -49,8 +49,12 @@ const itemInfoHash = (item) => {
 };
 
 // Heuristic: does a torrent/download name look like a TV series (season/episode markers)?
-// Used only to feed the series-typed catalogs — the movie catalogs are unfiltered (unchanged).
 const isSeriesName = (name) => /\b(s\d{1,2}e\d{1,3}|s\d{1,2}|\d{1,2}x\d{2}|season\s*\d+|complete\s+series)\b/i.test(`${name}`);
+
+// Is a TorBox download a series? Its name may lack season/episode markers (e.g. "House of the
+// Dragon 2160p"), so also treat it as a series when it contains 2+ episode-looking video files
+// (a season pack). Keeps series out of the movie catalog and into the series one.
+const isSeriesDownload = (item) => isSeriesName(item.name) || (item.episodeCount || 0) >= 2;
 
 // Stremio won't show streams for a `series` meta until it has a videos[] entry to click. Our
 // grouped Jackett items are flat (one set of source torrents, like a movie), so we expose a single
@@ -451,7 +455,9 @@ app.get("/:userConfig/catalog/:type/:id.json", async(req, res) => {
     const limit = pLimit(5);
 
     if(req.params.id === 'torbox-downloads'){
-      const items = await debrid.instance(userConfig).getCatalogItems();
+      // Movie catalog: TorBox downloads that are NOT series, so a season pack (House of the Dragon,
+      // etc.) doesn't show here as a movie with a wrong, movie-matched poster.
+      const items = (await debrid.instance(userConfig).getCatalogItems()).filter(item => !isSeriesDownload(item));
       const metas = await Promise.all(items.map(item => limit(async () => ({
         id: `torbox:${item.id}`,
         type: 'movie',
@@ -464,8 +470,8 @@ app.get("/:userConfig/catalog/:type/:id.json", async(req, res) => {
     }
 
     if(req.params.id === 'torbox-downloads-series'){
-      // Same TorBox downloads, filtered to series (season/episode names), typed as series.
-      const items = (await debrid.instance(userConfig).getCatalogItems()).filter(item => isSeriesName(item.name));
+      // Same TorBox downloads, filtered to series (by name or by episode-looking files), typed as series.
+      const items = (await debrid.instance(userConfig).getCatalogItems()).filter(isSeriesDownload);
       const metas = await Promise.all(items.map(item => limit(async () => {
         const art = await artworkFor(req, item.name, 'series');
         return {
@@ -555,7 +561,8 @@ app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
       if(!details){
         return respond(res, {meta: {}});
       }
-      const art = await artworkFor(req, details.name);
+      // Resolve the poster with the right type hint so a series doesn't match a same-named movie.
+      const art = await artworkFor(req, details.name, req.params.type === 'series' ? 'series' : undefined);
       const description = details.files.map(file => `${file.name} — ${bytesToSize(file.size)}`).join('\n');
       if(req.params.type === 'series'){
         // One clickable episode per video file in the download, so every episode shows.
