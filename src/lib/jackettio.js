@@ -1,5 +1,5 @@
 import pLimit from 'p-limit';
-import {parseWords, numberPad, sortBy, bytesToSize, wait, promiseTimeout} from './util.js';
+import {parseWords, numberPad, sortBy, bytesToSize, wait, promiseTimeout, formatDate} from './util.js';
 import config from './config.js';
 import cache from './cache.js';
 import { updateUserConfigWithMediaFlowIp, applyMediaflowProxyIfNeeded } from './mediaflowProxy.js';
@@ -458,6 +458,8 @@ function buildAccountStreams({userConfig, type, metaInfos, downloads, debridInst
     }
 
     const [torrentId, fileId] = file.id.split(':');
+    const added = formatDate(download.createdAt);
+    const inTorbox = `📁 In your TorBox${added ? ` · 📅 ${added}` : ''}`;
     const rows = [];
     if(ratingLine)rows.push(ratingLine);
     if(type == 'series'){
@@ -465,10 +467,10 @@ function buildAccountStreams({userConfig, type, metaInfos, downloads, debridInst
       const sizeStr = isPack ? `${bytesToSize(file.size)} / ${bytesToSize(download.size)}` : bytesToSize(file.size);
       rows.push(`✅ S${numberPad(season)}E${numberPad(episode)} · ${sizeStr}`);
       rows.push(file.name);
-      rows.push('📁 In your TorBox');
+      rows.push(inTorbox);
     }else{
       rows.push(file.name);
-      rows.push(`💾${bytesToSize(file.size)} 📁 In your TorBox`);
+      rows.push(`💾${bytesToSize(file.size)} ${inTorbox}`);
     }
 
     streams.push({
@@ -492,11 +494,14 @@ function buildDeleteStreams({userConfig, metaInfos, downloads, publicUrl}){
   const cfg = btoa(JSON.stringify(userConfig));
   return downloads
     .filter(download => normalizeTitle(download.name).includes(wantTitle))
-    .map(download => ({
-      name: `🗑️ ${config.addonName}`,
-      title: `🗑️ Delete from TorBox\n${download.name}\n${bytesToSize(download.size)}`,
-      url: `${publicUrl}/${cfg}/torbox/delete/${download.id}/${encodeURIComponent(download.name)}`
-    }));
+    .map(download => {
+      const added = formatDate(download.createdAt);
+      return {
+        name: `🗑️ ${config.addonName}`,
+        title: `🗑️ Delete from TorBox\n${download.name}\n${bytesToSize(download.size)}${added ? ` · 📅 ${added}` : ''}`,
+        url: `${publicUrl}/${cfg}/torbox/delete/${download.id}/${encodeURIComponent(download.name)}`
+      };
+    });
 }
 
 export async function getStreams(userConfig, type, stremioId, publicUrl){

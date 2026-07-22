@@ -15,7 +15,7 @@ import * as debrid from './lib/debrid.js';
 import {getIndexers, searchTorrents} from './lib/jackett.js';
 import * as jackettio from "./lib/jackettio.js";
 import {cleanTorrentFolder, createTorrentFolder, get as getTorrentInfos, getTorrentFile} from './lib/torrentInfos.js';
-import {bytesToSize, numberPad, promiseTimeout, wait} from './lib/util.js';
+import {bytesToSize, numberPad, promiseTimeout, wait, formatDate} from './lib/util.js';
 import {generatePoster, generatePosterSvg} from './lib/poster.js';
 import pLimit from 'p-limit';
 
@@ -144,11 +144,14 @@ async function buildDeleteStreams(req, userConfig, debridInstance, showName){
   const downloads = await debridInstance.getMyDownloads().catch(() => []);
   return downloads
     .filter(download => normalizeTitle(download.name).includes(want))
-    .map(download => ({
-      name: `🗑️ ${config.addonName}`,
-      title: `${download.name}\n${bytesToSize(download.size)}`,
-      url: `${getBaseUrl(req)}/${req.params.userConfig}/torbox/delete/${download.id}/${encodeURIComponent(download.name)}`
-    }));
+    .map(download => {
+      const added = formatDate(download.createdAt);
+      return {
+        name: `🗑️ ${config.addonName}`,
+        title: `${download.name}\n${bytesToSize(download.size)}${added ? ` · 📅 ${added}` : ''}`,
+        url: `${getBaseUrl(req)}/${req.params.userConfig}/torbox/delete/${download.id}/${encodeURIComponent(download.name)}`
+      };
+    });
 }
 
 // Time budget for the whole /stream request. Vercel Hobby kills the function at 10s, so we aim to
@@ -500,7 +503,7 @@ app.get("/:userConfig/catalog/:type/:id.json", async(req, res) => {
         name: item.name,
         ...(await artworkFor(req, item.name)),
         posterShape: 'poster',
-        description: `TorBox download — ${bytesToSize(item.size)}`
+        description: `TorBox download — ${bytesToSize(item.size)}${formatDate(item.createdAt) ? ` · 📅 ${formatDate(item.createdAt)}` : ''}`
       }))));
       return respond(res, {metas});
     }
@@ -516,7 +519,7 @@ app.get("/:userConfig/catalog/:type/:id.json", async(req, res) => {
           name: item.name,
           poster: art.poster,
           posterShape: 'poster',
-          description: `TorBox download — ${bytesToSize(item.size)}`
+          description: `TorBox download — ${bytesToSize(item.size)}${formatDate(item.createdAt) ? ` · 📅 ${formatDate(item.createdAt)}` : ''}`
         };
       })));
       return respond(res, {metas});

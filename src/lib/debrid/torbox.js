@@ -150,6 +150,7 @@ export default class TorBox {
           id: torrent.id,
           name: torrent.name,
           size: torrent.size,
+          createdAt: torrent.created_at || '',
           videoCount: videoFiles.length,
           // How many video files look like episodes — lets the catalog detect a series pack even
           // when the download's own name has no season/episode markers.
@@ -168,6 +169,7 @@ export default class TorBox {
         id: torrent.id,
         name: torrent.name,
         size: torrent.size,
+        createdAt: torrent.created_at || '',
         hash: `${torrent.hash || ''}`.toLowerCase(),
         files: (torrent.files || [])
           .filter(file => isVideo(file.name))
