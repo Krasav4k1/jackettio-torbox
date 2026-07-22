@@ -30,6 +30,15 @@ export function wait(ms){
   return setTimeout(ms);
 }
 
+// Best-effort video quality as a numeric height (2160/1080/720/480/360) parsed from a name, or 0
+// when unknown. "4k"/"uhd" map to 2160. Used to order streams best-quality-first.
+export function parseQuality(name){
+  const m = `${name}`.match(/(2160|1080|720|480|360)p\b/i);
+  if(m)return parseInt(m[1]);
+  if(/\b(4k|uhd)\b/i.test(`${name}`))return 2160;
+  return 0;
+}
+
 // A date-time as "YYYY-MM-DD HH:MM ET" in the America/New_York timezone (DST-aware; the tz label
 // is EST/EDT), or '' when the value is missing/invalid.
 export function formatDateTime(value){

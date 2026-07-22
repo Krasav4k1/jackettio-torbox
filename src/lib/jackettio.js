@@ -1,5 +1,5 @@
 import pLimit from 'p-limit';
-import {parseWords, numberPad, sortBy, bytesToSize, wait, promiseTimeout, formatDateTime} from './util.js';
+import {parseWords, numberPad, sortBy, bytesToSize, wait, promiseTimeout, formatDateTime, parseQuality} from './util.js';
 import config from './config.js';
 import cache from './cache.js';
 import { updateUserConfigWithMediaFlowIp, applyMediaflowProxyIfNeeded } from './mediaflowProxy.js';
@@ -442,7 +442,7 @@ function buildAccountStreams({userConfig, type, metaInfos, downloads, debridInst
 
   const {season, episode} = metaInfos;
   const cfg = btoa(JSON.stringify(userConfig));
-  const streams = [];
+  const entries = [];
 
   for(const download of downloads){
     if(!normalizeTitle(download.name).includes(wantTitle))continue; // different title
@@ -473,16 +473,23 @@ function buildAccountStreams({userConfig, type, metaInfos, downloads, debridInst
       rows.push(`💾${bytesToSize(file.size)} ${inTorbox}`);
     }
 
-    streams.push({
-      _hash: download.hash || '',
-      name: `[${debridInstance.shortName}+📁] ${userConfig.enableMediaFlow ? '🕵🏼‍♂️ ' : ''}${config.addonName}`,
-      title: rows.join('\n'),
-      url: `${publicUrl}/${cfg}/torbox/play/${torrentId}/${fileId}/${encodeURIComponent(file.name)}`,
-      // Same download continues to the next episode (binge auto-play).
-      behaviorHints: {bingeGroup: `${config.addonId}|torbox|${torrentId}`}
+    entries.push({
+      quality: parseQuality(file.name) || parseQuality(download.name),
+      size: file.size || 0,
+      stream: {
+        _hash: download.hash || '',
+        name: `[${debridInstance.shortName}+📁] ${userConfig.enableMediaFlow ? '🕵🏼‍♂️ ' : ''}${config.addonName}`,
+        title: rows.join('\n'),
+        url: `${publicUrl}/${cfg}/torbox/play/${torrentId}/${fileId}/${encodeURIComponent(file.name)}`,
+        // Same download continues to the next episode (binge auto-play).
+        behaviorHints: {bingeGroup: `${config.addonId}|torbox|${torrentId}`}
+      }
     });
   }
-  return streams;
+
+  // Best quality first, then largest — same intent as the Jackett quality/size sort.
+  entries.sort((a, b) => b.quality - a.quality || b.size - a.size);
+  return entries.map(entry => entry.stream);
 }
 
 // Delete streams for the user's own debrid downloads matching this title (by name) — one per whole
@@ -494,6 +501,8 @@ function buildDeleteStreams({userConfig, metaInfos, downloads, publicUrl}){
   const cfg = btoa(JSON.stringify(userConfig));
   return downloads
     .filter(download => normalizeTitle(download.name).includes(wantTitle))
+    // Best quality first, then largest, matching the play streams' order.
+    .sort((a, b) => (parseQuality(b.name) - parseQuality(a.name)) || (b.size - a.size))
     .map(download => {
       const added = formatDateTime(download.createdAt);
       return {

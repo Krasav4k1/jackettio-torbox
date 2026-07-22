@@ -15,7 +15,7 @@ import * as debrid from './lib/debrid.js';
 import {getIndexers, searchTorrents} from './lib/jackett.js';
 import * as jackettio from "./lib/jackettio.js";
 import {cleanTorrentFolder, createTorrentFolder, get as getTorrentInfos, getTorrentFile} from './lib/torrentInfos.js';
-import {bytesToSize, numberPad, promiseTimeout, wait, formatDateTime} from './lib/util.js';
+import {bytesToSize, numberPad, promiseTimeout, wait, formatDateTime, parseQuality} from './lib/util.js';
 import {generatePoster, generatePosterSvg} from './lib/poster.js';
 import pLimit from 'p-limit';
 
@@ -186,6 +186,8 @@ async function buildDeleteStreams(req, userConfig, debridInstance, showName){
   const downloads = await debridInstance.getMyDownloads().catch(() => []);
   return downloads
     .filter(download => normalizeTitle(download.name).includes(want))
+    // Best quality first, then largest.
+    .sort((a, b) => (parseQuality(b.name) - parseQuality(a.name)) || (b.size - a.size))
     .map(download => {
       const added = formatDateTime(download.createdAt);
       return {
@@ -835,11 +837,16 @@ app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
         return respond(res, {streams: []});
       }
       const ratingLine = group.imdbId ? await rating.getRatingLine({imdbId: group.imdbId, type: 'movie'}).catch(() => '') : '';
-      const streams = [];
-      for(const torrent of group.torrents){
+      // Resolve each torrent's movie file, then order best quality first, then largest.
+      const resolved = (await Promise.all(group.torrents.map(async torrent => {
         const details = await debridInstance.getTorrentDetails(torrent.id).catch(() => null);
-        if(!details || !details.files.length)continue;
+        if(!details || !details.files.length)return null;
         const file = details.files.slice().sort((a, b) => b.size - a.size)[0]; // largest video = the movie
+        return {torrent, details, file, quality: parseQuality(file.name) || parseQuality(details.name), size: file.size || 0};
+      }))).filter(Boolean);
+      resolved.sort((a, b) => b.quality - a.quality || b.size - a.size);
+      const streams = [];
+      for(const {torrent, details, file} of resolved){
         const [tId, fId] = file.id.split(':');
         const added = formatDateTime(torrent.createdAt);
         const playRows = [];
@@ -875,7 +882,8 @@ app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
       }
       const ratingLine = group.imdbId ? await rating.getRatingLine({imdbId: group.imdbId, type: 'series', season, episode}).catch(() => '') : '';
       const detailsList = await Promise.all(group.torrents.map(t => debridInstance.getTorrentDetails(t.id).catch(() => null)));
-      const streams = [];
+      // One entry per torrent that has this episode; ordered best quality first, then largest.
+      const resolved = [];
       for(const details of detailsList){
         if(!details)continue;
         const file = details.files.find(f => {
@@ -883,6 +891,10 @@ app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
           return se && se.season === season && se.episode === episode;
         });
         if(!file)continue;
+        resolved.push({details, file, quality: parseQuality(file.name) || parseQuality(details.name), size: file.size || 0});
+      }
+      resolved.sort((a, b) => b.quality - a.quality || b.size - a.size);
+      const streams = resolved.map(({details, file}) => {
         const [tId, fId] = file.id.split(':');
         const isPack = details.files.length > 1 && file.size < details.size;
         const sizeStr = isPack ? `${bytesToSize(file.size)} / ${bytesToSize(details.size)}` : bytesToSize(file.size);
@@ -891,13 +903,13 @@ app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
         rows.push(`🎬 S${numberPad(season)}E${numberPad(episode)} · ${sizeStr}`);
         rows.push(file.name);
         rows.push(`📁 ${details.name}`); // torrent name, so the two sources are distinguishable
-        streams.push({
+        return {
           name: `[TB+📁] ${config.addonName}`,
           title: rows.join('\n'),
           url: `${getBaseUrl(req)}/${req.params.userConfig}/torbox/play/${tId}/${fId}/${encodeURIComponent(file.name)}`,
           behaviorHints: {bingeGroup: `${config.addonId}|torbox|${tId}`}
-        });
-      }
+        };
+      });
       return respond(res, {streams});
     }
 
