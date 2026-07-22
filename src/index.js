@@ -133,6 +133,41 @@ async function singleAsGroup(id){
   return info ? {name: info.name, imdbId: null, poster: null, ids: [id]} : null;
 }
 
+// Group the user's TorBox series downloads by resolved IMDb id (fallback: normalized title), so
+// two torrents of the same show collapse into one catalog item. Each group -> {key, imdbId, name,
+// poster, torrentIds}. Cached briefly per user (searchInfo results are cached far longer, so the
+// per-download IMDb lookups are cheap on repeat). `key` is the tt id or a title token (colon-free),
+// which becomes the `torboxseries:<key>` meta/stream id.
+async function getTorboxSeriesGroups(debridInstance){
+  const userHash = await debridInstance.getUserHash().catch(() => '');
+  const cacheKey = `torboxseries:groups:${userHash}`;
+  const cached = await cache.get(cacheKey);
+  if(cached)return cached;
+
+  const items = (await debridInstance.getCatalogItems()).filter(isSeriesDownload);
+  const limit = pLimit(5);
+  const resolved = await Promise.all(items.map(item => limit(async () => {
+    const info = await meta.searchInfo(item.name, 'series').catch(() => ({poster: null, imdbId: null, name: null}));
+    return {item, info};
+  })));
+
+  const map = new Map();
+  for(const {item, info} of resolved){
+    const {title} = meta.parseTitleFromName(item.name);
+    const key = info.imdbId || normalizeTitle(title || item.name);
+    if(!key)continue;
+    if(!map.has(key))map.set(key, {key, imdbId: info.imdbId || null, name: info.name || title || item.name, poster: info.poster || null, torrentIds: [], newest: 0});
+    const group = map.get(key);
+    group.torrentIds.push(item.id);
+    if(!group.poster && info.poster)group.poster = info.poster;
+    group.newest = Math.max(group.newest, Date.parse(item.createdAt) || 0);
+  }
+
+  const groups = [...map.values()].sort((a, b) => b.newest - a.newest);
+  await cache.set(cacheKey, groups, {ttl: 300});
+  return groups;
+}
+
 // Streams for the virtual "delete" episode: one per TorBox torrent matching this show (by title).
 // Each shows the full torrent name + size and points at the delete route, so playing it removes
 // that whole torrent from TorBox. Returns [] for non-TorBox debrids or when nothing matches.
@@ -298,7 +333,7 @@ app.get("/:userConfig?/manifest.json", async(req, res) => {
     // TorBox exposes the user's completed downloads as a browsable catalog.
     if(userConfig.debridId === 'torbox'){
       manifest.resources = ["stream", "catalog", "meta"];
-      manifest.idPrefixes = ["tt", "torbox:", "jackettio:"];
+      manifest.idPrefixes = ["tt", "torbox:", "torboxseries:", "jackettio:"];
       manifest.catalogs = [
         {type: "movie", id: "torbox-downloads", name: "TorBox Downloads"},
         // Series counterpart of the TorBox downloads catalog (season/episode downloads).
@@ -509,19 +544,17 @@ app.get("/:userConfig/catalog/:type/:id.json", async(req, res) => {
     }
 
     if(req.params.id === 'torbox-downloads-series'){
-      // Same TorBox downloads, filtered to series (by name or by episode-looking files), typed as series.
-      const items = (await debrid.instance(userConfig).getCatalogItems()).filter(isSeriesDownload);
-      const metas = await Promise.all(items.map(item => limit(async () => {
-        const art = await artworkFor(req, item.name, 'series');
-        return {
-          id: `torbox:${item.id}`,
-          type: 'series',
-          name: item.name,
-          poster: art.poster,
-          posterShape: 'poster',
-          description: `TorBox download — ${bytesToSize(item.size)}${formatDate(item.createdAt) ? ` · 📅 ${formatDate(item.createdAt)}` : ''}`
-        };
-      })));
+      // TorBox series downloads grouped by show (resolved IMDb id / title): two torrents of the same
+      // show collapse into one item, whose episodes aggregate across all its torrents.
+      const groups = await getTorboxSeriesGroups(debrid.instance(userConfig));
+      const metas = groups.map(group => ({
+        id: `torboxseries:${group.key}`,
+        type: 'series',
+        name: group.name,
+        poster: group.poster || generatedPosterUrl(req, group.name),
+        posterShape: 'poster',
+        description: `${group.torrentIds.length} torrent${group.torrentIds.length > 1 ? 's' : ''} in TorBox`
+      }));
       return respond(res, {metas});
     }
 
@@ -592,6 +625,51 @@ app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
     const userConfig = Object.assign(JSON.parse(atob(req.params.userConfig)), {ip: req.clientIp});
     if(userConfig.debridId !== 'torbox'){
       return respond(res, {meta: {}});
+    }
+
+    // Grouped TorBox series (torboxseries:<key>): episodes aggregated across all torrents of the show.
+    if(req.params.id.startsWith('torboxseries:')){
+      const key = req.params.id.slice('torboxseries:'.length);
+      const debridInstance = debrid.instance(userConfig);
+      const group = (await getTorboxSeriesGroups(debridInstance)).find(g => g.key === key);
+      if(!group){
+        return respond(res, {meta: {}});
+      }
+      const detailsList = await Promise.all(group.torrentIds.map(id => debridInstance.getTorrentDetails(id).catch(() => null)));
+      // Unique (season, episode) across every torrent's files -> one clickable episode each.
+      const episodeMap = new Map();
+      for(const details of detailsList){
+        if(!details)continue;
+        for(const file of details.files){
+          const se = parseEpisode(file.name);
+          if(!se)continue;
+          const vkey = `${se.season}:${se.episode}`;
+          if(!episodeMap.has(vkey))episodeMap.set(vkey, {season: se.season, episode: se.episode, title: file.name});
+        }
+      }
+      const videos = [...episodeMap.values()]
+        .sort((a, b) => a.season - b.season || a.episode - b.episode)
+        .map(v => ({
+          id: `torboxseries:${key}:${v.season}:${v.episode}`,
+          title: v.title,
+          season: v.season,
+          episode: v.episode,
+          released: new Date().toISOString()
+        }));
+      videos.push(deleteVideo(`torboxseries:${key}`, group.name));
+      const record = group.imdbId ? await omdb.getById(group.imdbId).catch(() => null) : null;
+      const poster = group.poster || (record && record.poster) || generatedPosterUrl(req, group.name);
+      return respond(res, {meta: {
+        id: req.params.id,
+        type: 'series',
+        name: group.name,
+        poster,
+        posterShape: 'poster',
+        background: poster,
+        ...omdb.stremioMetaFields(record),
+        description: `${group.torrentIds.length} torrent${group.torrentIds.length > 1 ? 's' : ''} in TorBox`,
+        videos
+      }});
     }
 
     if(req.params.id.startsWith('torbox:')){
@@ -691,7 +769,11 @@ app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
       const debridInstance = debrid.instance(userConfig);
       const baseId = req.params.id.slice(0, -':delete'.length);
       let showName = '';
-      if(baseId.startsWith('torbox:')){
+      if(baseId.startsWith('torboxseries:')){
+        const key = baseId.slice('torboxseries:'.length);
+        const group = (await getTorboxSeriesGroups(debridInstance)).find(g => g.key === key);
+        showName = group ? group.name : '';
+      }else if(baseId.startsWith('torbox:')){
         const torrentId = baseId.slice('torbox:'.length).split(':')[0];
         const details = await debridInstance.getTorrentDetails(torrentId).catch(() => null);
         showName = details ? details.name : '';
@@ -701,6 +783,46 @@ app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
         showName = group ? group.name : '';
       }
       const streams = await buildDeleteStreams(req, userConfig, debridInstance, showName);
+      return respond(res, {streams});
+    }
+
+    // Grouped TorBox series episode (torboxseries:<key>:<season>:<episode>): one stream per torrent
+    // in the group that actually contains this episode.
+    if(req.params.id.startsWith('torboxseries:')){
+      const userConfig = Object.assign(JSON.parse(atob(req.params.userConfig)), {ip: req.clientIp});
+      const [key, seasonStr, episodeStr] = req.params.id.slice('torboxseries:'.length).split(':');
+      const season = parseInt(seasonStr);
+      const episode = parseInt(episodeStr);
+      const debridInstance = debrid.instance(userConfig);
+      const group = (await getTorboxSeriesGroups(debridInstance)).find(g => g.key === key);
+      if(!group){
+        return respond(res, {streams: []});
+      }
+      const ratingLine = group.imdbId ? await rating.getRatingLine({imdbId: group.imdbId, type: 'series', season, episode}).catch(() => '') : '';
+      const detailsList = await Promise.all(group.torrentIds.map(id => debridInstance.getTorrentDetails(id).catch(() => null)));
+      const streams = [];
+      for(const details of detailsList){
+        if(!details)continue;
+        const file = details.files.find(f => {
+          const se = parseEpisode(f.name);
+          return se && se.season === season && se.episode === episode;
+        });
+        if(!file)continue;
+        const [tId, fId] = file.id.split(':');
+        const isPack = details.files.length > 1 && file.size < details.size;
+        const sizeStr = isPack ? `${bytesToSize(file.size)} / ${bytesToSize(details.size)}` : bytesToSize(file.size);
+        const rows = [];
+        if(ratingLine)rows.push(ratingLine);
+        rows.push(`🎬 S${numberPad(season)}E${numberPad(episode)} · ${sizeStr}`);
+        rows.push(file.name);
+        rows.push(`📁 ${details.name}`); // torrent name, so the two sources are distinguishable
+        streams.push({
+          name: `[TB+📁] ${config.addonName}`,
+          title: rows.join('\n'),
+          url: `${getBaseUrl(req)}/${req.params.userConfig}/torbox/play/${tId}/${fId}/${encodeURIComponent(file.name)}`,
+          behaviorHints: {bingeGroup: `${config.addonId}|torbox|${tId}`}
+        });
+      }
       return respond(res, {streams});
     }
 
