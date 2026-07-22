@@ -68,6 +68,24 @@ const seriesVideos = (id, name) => [{
   released: new Date().toISOString()
 }];
 
+// Normalize a title for loose matching (drop punctuation/spacing/case).
+const normalizeTitle = (name) => `${name || ''}`.toLowerCase().replace(/[^a-z0-9]+/g, '');
+
+// A virtual "delete" episode appended to a series' videos[] (its own season 0). Opening it lists
+// every TorBox torrent matching this show; playing one deletes that whole torrent from TorBox
+// (handled by the `:delete` branch of the stream route).
+const deleteVideo = (baseId, showName) => {
+  const {title} = meta.parseTitleFromName(showName);
+  return {
+    id: `${baseId}:delete`,
+    title: `🗑️ Delete "${title || showName}" from TorBox`,
+    season: 0,
+    episode: 1,
+    overview: 'Open to list your TorBox torrents for this title. Playing one deletes it from TorBox.',
+    released: new Date(0).toISOString()
+  };
+};
+
 // Best-effort season/episode from a file/torrent name (SxxExx or NxNN), or null.
 const parseEpisode = (name) => {
   const m = `${name}`.match(/s(\d{1,2})[ ._-]*e(\d{1,3})/i) || `${name}`.match(/\b(\d{1,2})x(\d{1,2})\b/);
@@ -113,6 +131,24 @@ async function artworkFor(req, name, hintType){
 async function singleAsGroup(id){
   const info = await cache.get(`jackettio:torrent:${id}`);
   return info ? {name: info.name, imdbId: null, poster: null, ids: [id]} : null;
+}
+
+// Streams for the virtual "delete" episode: one per TorBox torrent matching this show (by title).
+// Each shows the full torrent name + size and points at the delete route, so playing it removes
+// that whole torrent from TorBox. Returns [] for non-TorBox debrids or when nothing matches.
+async function buildDeleteStreams(req, userConfig, debridInstance, showName){
+  if(userConfig.debridId !== 'torbox' || typeof debridInstance.getMyDownloads !== 'function')return [];
+  const {title} = meta.parseTitleFromName(showName);
+  const want = normalizeTitle(title || showName);
+  if(want.length < 3)return [];
+  const downloads = await debridInstance.getMyDownloads().catch(() => []);
+  return downloads
+    .filter(download => normalizeTitle(download.name).includes(want))
+    .map(download => ({
+      name: `🗑️ ${config.addonName}`,
+      title: `${download.name}\n${bytesToSize(download.size)}`,
+      url: `${getBaseUrl(req)}/${req.params.userConfig}/torbox/delete/${download.id}/${encodeURIComponent(download.name)}`
+    }));
 }
 
 // Time budget for the whole /stream request. Vercel Hobby kills the function at 10s, so we aim to
@@ -574,7 +610,7 @@ app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
           posterShape: 'poster',
           background: art.poster,
           description,
-          videos: torboxSeriesVideos(torrentId, details.files)
+          videos: [...torboxSeriesVideos(torrentId, details.files), deleteVideo(req.params.id, details.name)]
         }});
       }
       return respond(res, {meta: {
@@ -616,7 +652,7 @@ app.get("/:userConfig/meta/:type/:id.json", async(req, res) => {
           background: poster,
           ...enrich,
           description,
-          videos: seriesVideos(req.params.id, group.name)
+          videos: [...seriesVideos(req.params.id, group.name), deleteVideo(req.params.id, group.name)]
         }});
       }
       return respond(res, {meta: {
@@ -644,6 +680,26 @@ app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
   const reqStart = Date.now();
 
   try {
+
+    // Virtual "delete" episode: list every TorBox torrent matching this show, so playing one
+    // deletes that whole torrent. Works for both torbox:<id>:delete and jackettio:<groupId>:delete.
+    if(req.params.id.endsWith(':delete')){
+      const userConfig = Object.assign(JSON.parse(atob(req.params.userConfig)), {ip: req.clientIp});
+      const debridInstance = debrid.instance(userConfig);
+      const baseId = req.params.id.slice(0, -':delete'.length);
+      let showName = '';
+      if(baseId.startsWith('torbox:')){
+        const torrentId = baseId.slice('torbox:'.length).split(':')[0];
+        const details = await debridInstance.getTorrentDetails(torrentId).catch(() => null);
+        showName = details ? details.name : '';
+      }else if(baseId.startsWith('jackettio:')){
+        const groupId = baseId.split(':')[1];
+        const group = await cache.get(`jackettio:group:${groupId}`) || await singleAsGroup(groupId);
+        showName = group ? group.name : '';
+      }
+      const streams = await buildDeleteStreams(req, userConfig, debridInstance, showName);
+      return respond(res, {streams});
+    }
 
     // TorBox catalog items resolve to the download's video files instead of a Jackett search.
     if(req.params.id.startsWith('torbox:')){
