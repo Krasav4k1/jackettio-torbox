@@ -139,11 +139,15 @@ async function singleAsGroup(id){
 // (searchInfo results are cached far longer, so the per-download IMDb lookups are cheap on repeat).
 // `key` is the tt id or a title token (colon-free), which becomes the `torbox<movie|series>:<key>`
 // meta/stream id.
-async function getTorboxGroups(debridInstance, {series}){
+async function getTorboxGroups(debridInstance, {series, refresh = false}){
   const userHash = await debridInstance.getUserHash().catch(() => '');
   const cacheKey = `torbox${series ? 'series' : 'movie'}:groups:${userHash}`;
-  const cached = await cache.get(cacheKey);
-  if(cached)return cached;
+  // The catalog passes refresh:true so a reload always reflects torrents added directly in TorBox
+  // (there's no webhook to invalidate on an external add); it re-warms the cache for meta/stream.
+  if(!refresh){
+    const cached = await cache.get(cacheKey);
+    if(cached)return cached;
+  }
 
   const items = (await debridInstance.getCatalogItems()).filter(item => isSeriesDownload(item) === series);
   const limit = pLimit(5);
@@ -165,7 +169,9 @@ async function getTorboxGroups(debridInstance, {series}){
   }
 
   const groups = [...map.values()].sort((a, b) => b.newest - a.newest);
-  await cache.set(cacheKey, groups, {ttl: 300});
+  // Short TTL: this only coalesces the burst of requests within one browsing action (catalog -> meta
+  // -> stream); it bounds how stale a direct meta/stream deep-link can be for external adds.
+  await cache.set(cacheKey, groups, {ttl: 30});
   return groups;
 }
 
@@ -533,7 +539,7 @@ app.get("/:userConfig/catalog/:type/:id.json", async(req, res) => {
       // Movie catalog: TorBox (non-series) downloads grouped by show (resolved IMDb id / title), so
       // two torrents of the same movie collapse into one item. Series are excluded (they have their
       // own catalog) so a season pack never shows here with a wrong, movie-matched poster.
-      const groups = await getTorboxGroups(debrid.instance(userConfig), {series: false});
+      const groups = await getTorboxGroups(debrid.instance(userConfig), {series: false, refresh: true});
       const metas = groups.map(group => ({
         id: `torboxmovie:${group.key}`,
         type: 'movie',
@@ -548,7 +554,7 @@ app.get("/:userConfig/catalog/:type/:id.json", async(req, res) => {
     if(req.params.id === 'torbox-downloads-series'){
       // TorBox series downloads grouped by show (resolved IMDb id / title): two torrents of the same
       // show collapse into one item, whose episodes aggregate across all its torrents.
-      const groups = await getTorboxGroups(debrid.instance(userConfig), {series: true});
+      const groups = await getTorboxGroups(debrid.instance(userConfig), {series: true, refresh: true});
       const metas = groups.map(group => ({
         id: `torboxseries:${group.key}`,
         type: 'series',
