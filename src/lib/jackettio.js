@@ -483,6 +483,22 @@ function buildAccountStreams({userConfig, type, metaInfos, downloads, debridInst
   return streams;
 }
 
+// Delete streams for the user's own debrid downloads matching this title (by name) — one per whole
+// torrent (full name + size), shown at the very end of the list. Playing one deletes that torrent
+// from TorBox. No bingeGroup, so binge auto-play never selects a delete action.
+function buildDeleteStreams({userConfig, metaInfos, downloads, publicUrl}){
+  const wantTitle = normalizeTitle(metaInfos.name);
+  if(!downloads.length || wantTitle.length < 3)return [];
+  const cfg = btoa(JSON.stringify(userConfig));
+  return downloads
+    .filter(download => normalizeTitle(download.name).includes(wantTitle))
+    .map(download => ({
+      name: `🗑️ ${config.addonName}`,
+      title: `🗑️ Delete from TorBox\n${download.name}\n${bytesToSize(download.size)}`,
+      url: `${publicUrl}/${cfg}/torbox/delete/${download.id}/${encodeURIComponent(download.name)}`
+    }));
+}
+
 export async function getStreams(userConfig, type, stremioId, publicUrl){
 
   userConfig = await mergeDefaultUserConfig(userConfig);
@@ -514,10 +530,16 @@ export async function getStreams(userConfig, type, stremioId, publicUrl){
 
   const ratingLine = await ratingPromise;
 
+  const downloads = await downloadsPromise;
+
   // Streams from the user's own TorBox downloads that match this title/episode, shown first (they
   // play instantly — already downloaded). Dedupe any Jackett torrent that is the same release.
-  const accountStreams = buildAccountStreams({userConfig, type, metaInfos, downloads: await downloadsPromise, debridInstance, publicUrl, ratingLine});
+  const accountStreams = buildAccountStreams({userConfig, type, metaInfos, downloads, debridInstance, publicUrl, ratingLine});
   const accountHashes = new Set(accountStreams.map(stream => stream._hash).filter(Boolean));
+
+  // Delete streams (whole-torrent), appended last — lets the user remove a matching TorBox torrent
+  // straight from the normal (Cinemeta) movie/series page.
+  const deleteStreams = buildDeleteStreams({userConfig, metaInfos, downloads, publicUrl});
 
   const jackettStreams = torrents.filter(torrent => !accountHashes.has(torrent.infos.infoHash)).map(torrent => {
     const files = torrent.infos.files || [];
@@ -565,8 +587,9 @@ export async function getStreams(userConfig, type, stremioId, publicUrl){
     };
   });
 
-  // Account streams first (instant), then Jackett results. Strip the internal `_hash` field.
-  return [...accountStreams.map(({_hash, ...stream}) => stream), ...jackettStreams];
+  // Account streams first (instant), then Jackett results, then delete actions last. Strip the
+  // internal `_hash` field from account streams.
+  return [...accountStreams.map(({_hash, ...stream}) => stream), ...jackettStreams, ...deleteStreams];
 
 }
 
