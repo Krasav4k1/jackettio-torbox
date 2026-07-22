@@ -30,13 +30,21 @@ export function wait(ms){
   return setTimeout(ms);
 }
 
-// A date-time as "YYYY-MM-DD HH:MM" (UTC), or '' when the value is missing/invalid.
+// A date-time as "YYYY-MM-DD HH:MM ET" in the America/New_York timezone (DST-aware; the tz label
+// is EST/EDT), or '' when the value is missing/invalid.
 export function formatDateTime(value){
   if(!value)return '';
   const t = Date.parse(value);
   if(isNaN(t))return '';
-  const iso = new Date(t).toISOString();
-  return `${iso.slice(0, 10)} ${iso.slice(11, 16)}`;
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit',
+    timeZoneName: 'short'
+  }).formatToParts(new Date(t));
+  const get = type => (parts.find(part => part.type === type) || {}).value || '';
+  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')} ${get('timeZoneName')}`;
 }
 
 export function isVideo(filename){
