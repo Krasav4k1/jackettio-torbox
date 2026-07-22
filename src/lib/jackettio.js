@@ -1,5 +1,5 @@
 import pLimit from 'p-limit';
-import {parseWords, numberPad, sortBy, bytesToSize, wait, promiseTimeout, formatDate} from './util.js';
+import {parseWords, numberPad, sortBy, bytesToSize, wait, promiseTimeout, formatDateTime} from './util.js';
 import config from './config.js';
 import cache from './cache.js';
 import { updateUserConfigWithMediaFlowIp, applyMediaflowProxyIfNeeded } from './mediaflowProxy.js';
@@ -458,7 +458,7 @@ function buildAccountStreams({userConfig, type, metaInfos, downloads, debridInst
     }
 
     const [torrentId, fileId] = file.id.split(':');
-    const added = formatDate(download.createdAt);
+    const added = formatDateTime(download.createdAt);
     const inTorbox = `📁 In your TorBox${added ? ` · 📅 ${added}` : ''}`;
     const rows = [];
     if(ratingLine)rows.push(ratingLine);
@@ -495,7 +495,7 @@ function buildDeleteStreams({userConfig, metaInfos, downloads, publicUrl}){
   return downloads
     .filter(download => normalizeTitle(download.name).includes(wantTitle))
     .map(download => {
-      const added = formatDate(download.createdAt);
+      const added = formatDateTime(download.createdAt);
       return {
         name: `🗑️ ${config.addonName}`,
         title: `🗑️ Delete from TorBox\n${download.name}\n${bytesToSize(download.size)}${added ? ` · 📅 ${added}` : ''}`,

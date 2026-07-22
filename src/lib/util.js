@@ -30,11 +30,13 @@ export function wait(ms){
   return setTimeout(ms);
 }
 
-// A date as YYYY-MM-DD (UTC), or '' when the value is missing/invalid.
-export function formatDate(value){
+// A date-time as "YYYY-MM-DD HH:MM" (UTC), or '' when the value is missing/invalid.
+export function formatDateTime(value){
   if(!value)return '';
   const t = Date.parse(value);
-  return isNaN(t) ? '' : new Date(t).toISOString().slice(0, 10);
+  if(isNaN(t))return '';
+  const iso = new Date(t).toISOString();
+  return `${iso.slice(0, 10)} ${iso.slice(11, 16)}`;
 }
 
 export function isVideo(filename){

@@ -15,7 +15,7 @@ import * as debrid from './lib/debrid.js';
 import {getIndexers, searchTorrents} from './lib/jackett.js';
 import * as jackettio from "./lib/jackettio.js";
 import {cleanTorrentFolder, createTorrentFolder, get as getTorrentInfos, getTorrentFile} from './lib/torrentInfos.js';
-import {bytesToSize, numberPad, promiseTimeout, wait, formatDate} from './lib/util.js';
+import {bytesToSize, numberPad, promiseTimeout, wait, formatDateTime} from './lib/util.js';
 import {generatePoster, generatePosterSvg} from './lib/poster.js';
 import pLimit from 'p-limit';
 
@@ -180,7 +180,7 @@ async function buildDeleteStreams(req, userConfig, debridInstance, showName){
   return downloads
     .filter(download => normalizeTitle(download.name).includes(want))
     .map(download => {
-      const added = formatDate(download.createdAt);
+      const added = formatDateTime(download.createdAt);
       return {
         name: `🗑️ ${config.addonName}`,
         title: `${download.name}\n${bytesToSize(download.size)}${added ? ` · 📅 ${added}` : ''}`,
@@ -538,7 +538,7 @@ app.get("/:userConfig/catalog/:type/:id.json", async(req, res) => {
         name: item.name,
         ...(await artworkFor(req, item.name)),
         posterShape: 'poster',
-        description: `TorBox download — ${bytesToSize(item.size)}${formatDate(item.createdAt) ? ` · 📅 ${formatDate(item.createdAt)}` : ''}`
+        description: `TorBox download — ${bytesToSize(item.size)}${formatDateTime(item.createdAt) ? ` · 📅 ${formatDateTime(item.createdAt)}` : ''}`
       }))));
       return respond(res, {metas});
     }
