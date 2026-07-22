@@ -788,6 +788,12 @@ app.get("/:userConfig/stream/:type/:id.json", limiter, async(req, res) => {
 
   try {
 
+    // TorBox-backed stream lists (grouped movie/series, downloads, delete lists) must reflect a
+    // delete or a new download immediately — never let Stremio or a CDN serve a cached copy.
+    if(req.params.id.startsWith('torbox') || req.params.id.endsWith(':delete')){
+      noCache(res);
+    }
+
     // Virtual "delete" episode: list every TorBox torrent matching this show, so playing one
     // deletes that whole torrent. Works for both torbox:<id>:delete and jackettio:<groupId>:delete.
     if(req.params.id.endsWith(':delete')){
@@ -1175,6 +1181,13 @@ app.get('/:userConfig/torbox/delete/:torrentId/:name?', async(req, res) => {
     }
     const debridInstance = debrid.instance(userConfig);
     await debridInstance.deleteTorrent(req.params.torrentId);
+    // Drop our cached grouping so the catalog/streams rebuild without the deleted torrent (instead
+    // of waiting out the group cache's short TTL).
+    const userHash = await debridInstance.getUserHash().catch(() => '');
+    await Promise.all([
+      cache.del(`torboxmovie:groups:${userHash}`).catch(() => {}),
+      cache.del(`torboxseries:groups:${userHash}`).catch(() => {})
+    ]);
     return res.status(204).end();
   }catch(err){
     console.log('torbox delete', err);
