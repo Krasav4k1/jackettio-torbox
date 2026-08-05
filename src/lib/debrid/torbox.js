@@ -1,7 +1,14 @@
 import {createHash} from 'crypto';
 import {basename} from 'path';
 import {ERROR} from './const.js';
+import cache from '../cache.js';
 import {isVideo} from '../util.js';
+
+// The account's torrent list is requested many times per browsing action (catalog, meta, every
+// stream, cache/account checks, per-torrent details). TorBox rate-limits its API (429), so serve
+// them all from one short-lived snapshot: a page load costs one /mylist call instead of a dozen.
+// Kept short so deletes and new downloads still surface quickly; invalidated explicitly on delete.
+const MYLIST_TTL = 15;
 
 // A file name that looks like a TV episode (SxxExx or NxNN). Used to detect series downloads by
 // their contents, not just the top-level name (a season pack often has no SxxExx in its title).
@@ -54,9 +61,24 @@ export default class TorBox {
     });
   }
 
-  async getProgressTorrents(torrents){
+  // One cached snapshot of the account's torrent list, shared by every read path below.
+  async #mylist(){
+    const key = `torbox:mylist:${await this.getUserHash()}`;
+    const cached = await cache.get(key);
+    if(cached)return cached;
     const res = await this.#request('GET', '/torrents/mylist', {query: {bypass_cache: 'true'}});
-    return (res.data || []).reduce((progress, torrent) => {
+    const data = res.data || [];
+    await cache.set(key, data, {ttl: MYLIST_TTL});
+    return data;
+  }
+
+  // Drop the snapshot so the next read reflects a change we just made (e.g. a delete).
+  async invalidateMyList(){
+    return cache.del(`torbox:mylist:${await this.getUserHash()}`).catch(() => {});
+  }
+
+  async getProgressTorrents(torrents){
+    return (await this.#mylist()).reduce((progress, torrent) => {
       // Key by lowercased hash so lookups against the (lowercased) parsed infoHash match reliably.
       progress[`${torrent.hash || ''}`.toLowerCase()] = {
         // TorBox progress is a ratio between 0 and 1
@@ -134,14 +156,14 @@ export default class TorBox {
   async deleteTorrent(torrentId){
     const body = JSON.stringify({torrent_id: parseInt(torrentId), operation: 'delete'});
     await this.#request('POST', '/torrents/controltorrent', {body, headers: {'content-type': 'application/json'}});
+    await this.invalidateMyList();
     return true;
   }
 
   // Catalog: list the user's completed downloads that contain at least one video file.
   // Newest first. Used to source the "TorBox Downloads" Stremio catalog.
   async getCatalogItems(){
-    const res = await this.#request('GET', '/torrents/mylist', {query: {bypass_cache: 'true'}});
-    return (res.data || [])
+    return (await this.#mylist())
       .filter(torrent => torrent.download_present && (torrent.files || []).some(file => isVideo(file.name)))
       .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
       .map(torrent => {
@@ -162,8 +184,7 @@ export default class TorBox {
   // The user's completed downloads with their video files and infohash. Used to surface an
   // already-downloaded title as a stream on the normal (imdb) movie/series page. One /mylist call.
   async getMyDownloads(){
-    const res = await this.#request('GET', '/torrents/mylist', {query: {bypass_cache: 'true'}});
-    return (res.data || [])
+    return (await this.#mylist())
       .filter(torrent => torrent.download_present && (torrent.files || []).some(file => isVideo(file.name)))
       .map(torrent => ({
         id: torrent.id,
@@ -213,8 +234,7 @@ export default class TorBox {
       })(),
       (async () => {
         try {
-          const res = await this.#request('GET', '/torrents/mylist', {query: {bypass_cache: 'true'}});
-          for(const torrent of (res.data || [])){
+          for(const torrent of (await this.#mylist())){
             if(torrent.hash)accountHashes.add(`${torrent.hash}`.toLowerCase());
             if(torrent.name)accountNames.add(`${torrent.name}`.toLowerCase());
           }
@@ -233,8 +253,12 @@ export default class TorBox {
   }
 
   // Catalog: return a single download's name and its video files (for meta + stream lists).
+  // Served from the shared snapshot — a grouped title asks for several torrents in one request, and
+  // one /mylist?id= call each is what trips TorBox's rate limit. Falls back to a direct fetch for a
+  // torrent the snapshot doesn't have yet (e.g. just added).
   async getTorrentDetails(torrentId){
-    const torrent = await this.#getTorrent(torrentId);
+    let torrent = (await this.#mylist().catch(() => [])).find(t => `${t.id}` == `${torrentId}`);
+    if(!torrent)torrent = await this.#getTorrent(torrentId);
     if(!torrent)return null;
     const files = (torrent.files || [])
       .filter(file => isVideo(file.name))

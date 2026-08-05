@@ -216,12 +216,28 @@ async function resolveInfoHash(info, timeoutMs){
   }
 }
 
+// The stream id of a TorBox-backed listing: the grouped movie/series items, a download's files, and
+// the delete lists. These are cheap lookups against the user's own TorBox account and never run a
+// Jackett search, so they're exempt from the rate limit (which exists to protect the expensive
+// tracker search on public instances). They're also sent no-store, so Stremio re-requests them on
+// every open — counting those would exhaust the budget just by browsing your own downloads.
+const isTorboxStreamId = (id) => `${id}`.startsWith('torbox') || `${id}`.endsWith(':delete');
+
 const limiter = rateLimit({
   windowMs: config.rateLimitWindow * 1000,
   max: config.rateLimitRequest,
   legacyHeaders: false,
   standardHeaders: 'draft-7',
   keyGenerator: (req) => req.clientIp || req.ip,
+  skip: (req) => {
+    // Route middleware runs with req.params populated (and URL-decoded); fall back to the path.
+    let id = (req.params && req.params.id) || '';
+    if(!id){
+      const match = `${req.path}`.match(/\/stream\/[^/]+\/(.+)\.json$/);
+      id = match ? decodeURIComponent(match[1]) : '';
+    }
+    return isTorboxStreamId(id);
+  },
   handler: (req, res, next, options) => {
     if(req.route.path == '/:userConfig/stream/:type/:id.json'){
       const resetInMs = new Date(req.rateLimit.resetTime) - new Date();
