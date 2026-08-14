@@ -1,11 +1,12 @@
 {
   "name": "jackettio",
-  "version": "1.7.22",
+  "version": "1.7.23",
   "description": "Jackett and Debrid on Stremio",
   "main": "src/index.js",
   "type": "module",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "cache:clean": "node scripts/cache-clean.mjs"
   },
   "keywords": [
     "stremio",

@@ -152,6 +152,23 @@ The addon auto-detects, in priority order:
 Works on any host (Vercel, Docker, local). After adding the integration, **redeploy** and check
 the deployment's Runtime Logs for `Cache store: upstash-rest` (or `redis`) to confirm it's active.
 
+#### Inspecting and clearing the cache
+
+Everything the addon stores is a cache with a TTL, so clearing it is always safe — it refills on
+demand (the next few loads are just slower). Credentials are read from the environment or a `.env`
+file in the project root:
+
+```bash
+npm run cache:clean                        # read-only: key counts per prefix
+npm run cache:clean -- --all               # delete everything
+npm run cache:clean -- --prefix torrentInfos: --prefix jackettItems:
+npm run cache:clean -- --all --dry-run     # preview, delete nothing
+```
+
+A bare `npm run cache:clean` never deletes anything. The bulky prefixes are `torrentInfos:`,
+`jackettItems:`, `cinemeta:` and `jackettio:pagedgroups:`; `info:`, `rating:` and `omdb:` are tiny
+but expensive to rebuild, so they're worth keeping when trimming selectively.
+
 **Important caveats:**
 
 - **Jackett cannot run on Vercel.** You must host Jackett elsewhere (self-host / VPS) and point
