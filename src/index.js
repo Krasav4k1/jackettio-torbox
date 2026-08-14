@@ -208,6 +208,15 @@ async function paceRedirect(key){
   return delay;
 }
 
+// Content type for a video file, from its extension. Used to answer a player's HEAD probe locally.
+const VIDEO_CONTENT_TYPES = {
+  mkv: 'video/x-matroska', mk3d: 'video/x-matroska', mp4: 'video/mp4', m4v: 'video/x-m4v',
+  avi: 'video/x-msvideo', mov: 'video/quicktime', webm: 'video/webm', wmv: 'video/x-ms-wmv',
+  flv: 'video/x-flv', mpg: 'video/mpeg', mpeg: 'video/mpeg', ts: 'video/mp2t', m2ts: 'video/mp2t',
+  ogm: 'video/ogg', '3gp': 'video/3gpp', '3g2': 'video/3gpp2'
+};
+const videoContentType = (name) => VIDEO_CONTENT_TYPES[`${name}`.split('.').pop().toLowerCase()] || 'video/mp4';
+
 // Probe a link we're about to serve, at most once every couple of minutes per file, so a link that
 // TorBox is refusing shows up in the log (and gets evicted) instead of failing silently in the
 // player. Cached links need this too — a session minutes later reuses one we never re-checked.
@@ -1308,6 +1317,23 @@ app.use('/:userConfig/torbox/play/:torrentId/:fileId/:name?', async(req, res, ne
 
     const userConfig = Object.assign(JSON.parse(atob(req.params.userConfig)), {ip: req.clientIp});
     const debridInstance = debrid.instance(userConfig);
+
+    // Stremio probes with HEAD before playing (see Stremio/stremio-bugs#2091: one play fans out into
+    // a HEAD plus a stream of GETs from several HTTP clients). Answer the probe from the file
+    // metadata we already hold instead of redirecting, so it never costs a TorBox connection —
+    // those connections are what TorBox rate-limits. Falls through to the redirect if unknown.
+    if(req.method === 'HEAD'){
+      const details = await debridInstance.getTorrentDetails(req.params.torrentId).catch(() => null);
+      const file = details && details.files.find(f => `${f.id}` === `${req.params.torrentId}:${req.params.fileId}`);
+      if(file && file.size > 0){
+        res.set('Content-Type', videoContentType(file.name));
+        res.set('Content-Length', `${file.size}`);
+        res.set('Accept-Ranges', 'bytes');
+        res.set('Cache-Control', 'private, max-age=300');
+        return res.status(200).end();
+      }
+    }
+
     // Cache the resolved link per user+file — the player re-hits this redirect often and each miss
     // is a TorBox requestdl call.
     const urlCacheKey = `torbox:playurl:${await debridInstance.getUserHash()}:${req.params.torrentId}:${req.params.fileId}`;

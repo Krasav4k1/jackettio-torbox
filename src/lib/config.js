@@ -11,10 +11,10 @@ export default {
   // the server, not the player, so it spends the link's request budget and can report a misleading
   // 429. Enable only to diagnose playback failures.
   probeLinks: (process.env.PROBE_LINKS || 'false') === 'true',
-  // Send the viewer's IP to TorBox when requesting a download link. It only picks the nearest CDN
-  // and is optional; on a shared (carrier-NAT) address it can attract other people's rate limiting,
-  // so it is off by default. Set TORBOX_SEND_USER_IP=true to restore the old behaviour.
-  torboxSendUserIp: (process.env.TORBOX_SEND_USER_IP || 'false') === 'true',
+  // Send the viewer's IP to TorBox when requesting a download link, so TorBox picks the nearest CDN.
+  // Optional in their API; set TORBOX_SEND_USER_IP=false to omit it (worth trying on a carrier-NAT
+  // mobile connection, where the address is shared and can rotate mid-session).
+  torboxSendUserIp: (process.env.TORBOX_SEND_USER_IP || 'true') === 'true',
   // Jacket instance url
   jackettUrl: process.env.JACKETT_URL || 'http://localhost:9117',
   // Jacket API key
