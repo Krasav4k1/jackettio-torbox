@@ -155,6 +155,7 @@ async function resolveUrlOnce(cacheKey, resolve){
 // TorBox is refusing shows up in the log (and gets evicted) instead of failing silently in the
 // player. Cached links need this too — a session minutes later reuses one we never re-checked.
 async function maybeProbe(url, cacheKey){
+  if(!config.probeLinks)return;
   const marker = `${cacheKey}:probed`;
   if(await cache.get(marker))return;
   await cache.set(marker, 1, {ttl: 120});
@@ -342,6 +343,10 @@ app.set('trust proxy', config.trustProxy);
 
 app.use((req, res, next) => {
   req.clientIp = req.ip;
+  // Vercel sets this itself and overwrites anything the client sends, so it's the trustworthy
+  // source for the real viewer IP — which matters because it's what TorBox locks a link to.
+  const vercelIp = req.get('x-vercel-forwarded-for');
+  if(vercelIp)req.clientIp = `${vercelIp}`.split(',')[0].trim();
   if(req.get('CF-Connecting-IP')){
     req.clientIp = req.get('CF-Connecting-IP');
   }
@@ -1249,7 +1254,12 @@ app.use('/:userConfig/torbox/play/:torrentId/:fileId/:name?', async(req, res, ne
     // Cache the resolved link per user+file — the player re-hits this redirect often and each miss
     // is a TorBox requestdl call.
     const urlCacheKey = `torbox:playurl:${await debridInstance.getUserHash()}:${req.params.torrentId}:${req.params.fileId}`;
-    const url = await resolveUrlOnce(urlCacheKey, () => debridInstance.getDownload({id: `${req.params.torrentId}:${req.params.fileId}`}));
+    const url = await resolveUrlOnce(urlCacheKey, () => {
+      // TorBox locks the link to this IP — log it so a wrong one (a proxy address instead of the
+      // viewer's) is obvious, since that makes TorBox throttle the real player with a 429.
+      console.log(`torbox play: new link for ${req.params.torrentId}:${req.params.fileId}, user_ip=${req.clientIp}`);
+      return debridInstance.getDownload({id: `${req.params.torrentId}:${req.params.fileId}`});
+    });
     await maybeProbe(url, urlCacheKey);
 
     // Let the player reuse this redirect instead of re-invoking us for every range request.

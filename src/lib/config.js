@@ -2,7 +2,15 @@ export default {
   // Server port
   port: parseInt(process.env.PORT || 4000),
   // https://expressjs.com/en/guide/behind-proxies.html
-  trustProxy: boolOrString(process.env.TRUST_PROXY || 'loopback, linklocal, uniquelocal'),
+  // On Vercel every request arrives through Vercel's proxy, which is not in the loopback/linklocal/
+  // uniquelocal ranges — so the default would leave req.ip pointing at the proxy instead of the
+  // real client. That IP is sent to TorBox as user_ip and the download link is locked to it, so
+  // getting it wrong makes TorBox throttle the actual player. Trust the proxy when on Vercel.
+  trustProxy: boolOrString(process.env.TRUST_PROXY || (process.env.VERCEL ? 'true' : 'loopback, linklocal, uniquelocal')),
+  // Probe a freshly resolved download link and log the status. Off by default: the probe comes from
+  // the server, not the player, so it spends the link's request budget and can report a misleading
+  // 429. Enable only to diagnose playback failures.
+  probeLinks: (process.env.PROBE_LINKS || 'false') === 'true',
   // Jacket instance url
   jackettUrl: process.env.JACKETT_URL || 'http://localhost:9117',
   // Jacket API key
