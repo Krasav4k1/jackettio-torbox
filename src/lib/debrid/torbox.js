@@ -1,6 +1,7 @@
 import {createHash} from 'crypto';
 import {basename} from 'path';
 import {ERROR} from './const.js';
+import config from '../config.js';
 import cache from '../cache.js';
 import {isVideo, wait} from '../util.js';
 
@@ -119,12 +120,14 @@ export default class TorBox {
       throw new Error(ERROR.NOT_READY);
     }
 
-    const res = await this.#request('GET', '/torrents/requestdl', {query: {
-      token: this.#apiKey,
-      torrent_id: torrentId,
-      file_id: fileId,
-      user_ip: this.#ip
-    }});
+    // user_ip is optional in TorBox's API and only selects the nearest CDN. Sending it makes TorBox
+    // account for the request against that address, which backfires when the viewer is behind
+    // carrier-grade NAT (a mobile network), where the address is shared with many other people —
+    // their traffic then counts against this download and TorBox answers 429. Off by default.
+    const query = {token: this.#apiKey, torrent_id: torrentId, file_id: fileId};
+    if(config.torboxSendUserIp && this.#ip)query.user_ip = this.#ip;
+
+    const res = await this.#request('GET', '/torrents/requestdl', {query});
 
     if(!res.data){
       throw new Error(`Unable to request TorBox download link: ${JSON.stringify(res)}`);

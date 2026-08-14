@@ -3,14 +3,18 @@ export default {
   port: parseInt(process.env.PORT || 4000),
   // https://expressjs.com/en/guide/behind-proxies.html
   // On Vercel every request arrives through Vercel's proxy, which is not in the loopback/linklocal/
-  // uniquelocal ranges — so the default would leave req.ip pointing at the proxy instead of the
-  // real client. That IP is sent to TorBox as user_ip and the download link is locked to it, so
-  // getting it wrong makes TorBox throttle the actual player. Trust the proxy when on Vercel.
+  // uniquelocal ranges — so the default would leave req.ip pointing at the proxy rather than the
+  // viewer. The address is used for rate limiting here and (optionally) sent to TorBox for CDN
+  // selection, so it should be the real client. Trust the proxy when on Vercel.
   trustProxy: boolOrString(process.env.TRUST_PROXY || (process.env.VERCEL ? 'true' : 'loopback, linklocal, uniquelocal')),
   // Probe a freshly resolved download link and log the status. Off by default: the probe comes from
   // the server, not the player, so it spends the link's request budget and can report a misleading
   // 429. Enable only to diagnose playback failures.
   probeLinks: (process.env.PROBE_LINKS || 'false') === 'true',
+  // Send the viewer's IP to TorBox when requesting a download link. It only picks the nearest CDN
+  // and is optional; on a shared (carrier-NAT) address it can attract other people's rate limiting,
+  // so it is off by default. Set TORBOX_SEND_USER_IP=true to restore the old behaviour.
+  torboxSendUserIp: (process.env.TORBOX_SEND_USER_IP || 'false') === 'true',
   // Jacket instance url
   jackettUrl: process.env.JACKETT_URL || 'http://localhost:9117',
   // Jacket API key
