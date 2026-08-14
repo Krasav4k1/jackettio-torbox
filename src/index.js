@@ -133,6 +133,24 @@ async function singleAsGroup(id){
   return info ? {name: info.name, imdbId: null, poster: null, ids: [id]} : null;
 }
 
+// Resolve a playable link once per cache key. A player opens many parallel range requests for the
+// same file (a dozen within seconds), and on a cache miss every one of them would call TorBox's
+// requestdl — which TorBox rate-limits (429), and which churns out a new link each time. Share the
+// first in-flight resolution with all the callers waiting on it, then cache the result.
+const urlInFlight = {};
+async function resolveUrlOnce(cacheKey, resolve){
+  const cached = await cache.get(cacheKey);
+  if(cached)return cached;
+  if(!urlInFlight[cacheKey]){
+    urlInFlight[cacheKey] = (async () => {
+      const url = await resolve();
+      if(url)await cache.set(cacheKey, url, {ttl: 3600});
+      return url;
+    })().finally(() => { delete urlInFlight[cacheKey]; });
+  }
+  return urlInFlight[cacheKey];
+}
+
 // Group the user's TorBox downloads (movies or series, per `series`) by resolved IMDb id (fallback:
 // normalized title), so two torrents of the same title collapse into one catalog item. Each group
 // -> {key, imdbId, name, poster, torrents:[{id,name,size,createdAt}]}. Cached briefly per user
@@ -1085,8 +1103,8 @@ app.use('/:userConfig/torbox/resolve/:id/:name?', async(req, res, next) => {
     // requests a link each time. Cache the resolved URL per user+source so repeats are free (and
     // don't spam TorBox / the tracker).
     const urlCacheKey = `torbox:resolveurl:${await debridInstance.getUserHash()}:${req.params.id}`;
-    let url = await cache.get(urlCacheKey);
-    if(!url){
+    const url = await resolveUrlOnce(urlCacheKey, async () => {
+      let url;
       const raw = await cache.get(`jackettio:torrent:${req.params.id}`);
       if(!raw){
         throw new Error('Torrent info expired — reopen the catalog');
@@ -1110,9 +1128,10 @@ app.use('/:userConfig/torbox/resolve/:id/:name?', async(req, res, next) => {
           url = await debridInstance.getBufferDownload(buffer, infos.infoHash);
         }
       }
-      if(url)await cache.set(urlCacheKey, url, {ttl: 3600});
-    }
+      return url;
+    });
 
+    res.set('Cache-Control', 'private, max-age=300');
     res.status(302);
     res.set('location', url);
     res.send('');
@@ -1161,12 +1180,10 @@ app.use('/:userConfig/torbox/play/:torrentId/:fileId/:name?', async(req, res, ne
     // Cache the resolved link per user+file — the player re-hits this redirect often and each miss
     // is a TorBox requestdl call.
     const urlCacheKey = `torbox:playurl:${await debridInstance.getUserHash()}:${req.params.torrentId}:${req.params.fileId}`;
-    let url = await cache.get(urlCacheKey);
-    if(!url){
-      url = await debridInstance.getDownload({id: `${req.params.torrentId}:${req.params.fileId}`});
-      if(url)await cache.set(urlCacheKey, url, {ttl: 3600});
-    }
+    const url = await resolveUrlOnce(urlCacheKey, () => debridInstance.getDownload({id: `${req.params.torrentId}:${req.params.fileId}`}));
 
+    // Let the player reuse this redirect instead of re-invoking us for every range request.
+    res.set('Cache-Control', 'private, max-age=300');
     res.status(302);
     res.set('location', url);
     res.send('');

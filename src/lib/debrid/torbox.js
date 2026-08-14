@@ -2,7 +2,7 @@ import {createHash} from 'crypto';
 import {basename} from 'path';
 import {ERROR} from './const.js';
 import cache from '../cache.js';
-import {isVideo} from '../util.js';
+import {isVideo, wait} from '../util.js';
 
 // The account's torrent list is requested many times per browsing action (catalog, meta, every
 // stream, cache/account checks, per-torrent details). TorBox rate-limits its API (429), so serve
@@ -313,7 +313,17 @@ export default class TorBox {
     });
 
     const url = `https://api.torbox.app/v1/api${path}?${new URLSearchParams(opts.query).toString()}`;
-    const res = await fetch(url, opts);
+
+    // TorBox rate-limits its API and answers 429. A single 429 while resolving a link breaks
+    // playback, so back off and retry briefly. Only GETs are retried — a POST body (FormData /
+    // stream) is already consumed and can't be replayed.
+    let res = await fetch(url, opts);
+    for(let attempt = 0; res.status === 429 && method === 'GET' && attempt < 3; attempt++){
+      await wait(400 * Math.pow(2, attempt));
+      console.log(`TorBox 429 on ${path}, retry ${attempt + 1}/3`);
+      res = await fetch(url, opts);
+    }
+
     let data;
 
     try {
