@@ -144,27 +144,39 @@ async function resolveUrlOnce(cacheKey, resolve){
   if(!urlInFlight[cacheKey]){
     urlInFlight[cacheKey] = (async () => {
       const url = await resolve();
-      if(url){
-        await probeLink(url);
-        await cache.set(cacheKey, url, {ttl: 3600});
-      }
+      if(url)await cache.set(cacheKey, url, {ttl: 3600});
       return url;
     })().finally(() => { delete urlInFlight[cacheKey]; });
   }
   return urlInFlight[cacheKey];
 }
 
+// Probe a link we're about to serve, at most once every couple of minutes per file, so a link that
+// TorBox is refusing shows up in the log (and gets evicted) instead of failing silently in the
+// player. Cached links need this too — a session minutes later reuses one we never re-checked.
+async function maybeProbe(url, cacheKey){
+  const marker = `${cacheKey}:probed`;
+  if(await cache.get(marker))return;
+  await cache.set(marker, 1, {ttl: 120});
+  return probeLink(url, cacheKey);
+}
+
 // TorBox throttles the download itself (429) separately from its API, and that failure is normally
 // invisible to us: the player follows our redirect straight to TorBox's CDN, so all we ever log is
 // our own 302. Probe a freshly minted link once (2 bytes, once per hour per file) so the real cause
 // lands in the log instead of only on the user's screen.
-async function probeLink(url){
+async function probeLink(url, cacheKey){
   try {
     const res = await promiseTimeout(fetch(url, {method: 'GET', headers: {range: 'bytes=0-1'}}), 2500);
-    if(res.status === 429){
-      console.log(`TorBox download link is rate-limited (HTTP 429). TorBox throttles a link used by too many simultaneous connections (their guidance: max 4) or when a plan limit is hit.`);
-    }else if(res.status >= 400){
-      console.log(`TorBox download link probe: HTTP ${res.status}`);
+    if(res.status >= 400){
+      // TorBox states the reason in the body (e.g. COOLDOWN_LIMIT / ACTIVE_LIMIT / MONTHLY_LIMIT).
+      let detail = '';
+      try {
+        detail = `${await res.text()}`.slice(0, 300).replace(/\s+/g, ' ').trim();
+      }catch(err){}
+      console.log(`TorBox download link HTTP ${res.status}${detail ? ` — ${detail}` : ''} (429 = too many simultaneous connections to one link, or a plan limit)`);
+      // Don't keep serving a link TorBox refuses — the next request mints a fresh one.
+      if(cacheKey)await cache.del(cacheKey).catch(() => {});
     }
     return res.status;
   }catch(err){
@@ -1151,6 +1163,7 @@ app.use('/:userConfig/torbox/resolve/:id/:name?', async(req, res, next) => {
       }
       return url;
     });
+    await maybeProbe(url, urlCacheKey);
 
     res.set('Cache-Control', 'private, max-age=300');
     res.status(302);
@@ -1202,6 +1215,7 @@ app.use('/:userConfig/torbox/play/:torrentId/:fileId/:name?', async(req, res, ne
     // is a TorBox requestdl call.
     const urlCacheKey = `torbox:playurl:${await debridInstance.getUserHash()}:${req.params.torrentId}:${req.params.fileId}`;
     const url = await resolveUrlOnce(urlCacheKey, () => debridInstance.getDownload({id: `${req.params.torrentId}:${req.params.fileId}`}));
+    await maybeProbe(url, urlCacheKey);
 
     // Let the player reuse this redirect instead of re-invoking us for every range request.
     res.set('Cache-Control', 'private, max-age=300');
