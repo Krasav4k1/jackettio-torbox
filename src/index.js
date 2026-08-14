@@ -5,7 +5,7 @@ import localtunnel from 'localtunnel';
 import { rateLimit } from 'express-rate-limit';
 import {readFileSync} from "fs";
 import config from './lib/config.js';
-import cache, {vacuum as vacuumCache, clean as cleanCache, flush as flushCache, storeName as cacheStoreName} from './lib/cache.js';
+import cache, {vacuum as vacuumCache, clean as cleanCache, flush as flushCache, storeName as cacheStoreName, setIfAbsent, incrementBy} from './lib/cache.js';
 import path from 'path';
 import * as meta from './lib/meta.js';
 import * as rating from './lib/rating.js';
@@ -137,15 +137,39 @@ async function singleAsGroup(id){
 // same file (a dozen within seconds), and on a cache miss every one of them would call TorBox's
 // requestdl — which TorBox rate-limits (429), and which churns out a new link each time. Share the
 // first in-flight resolution with all the callers waiting on it, then cache the result.
+// This map only de-duplicates within one instance, and a burst of player connections is spread over
+// several serverless instances (the logs show 4 at once, minting 3 different links for one file).
+// So the shared cache is used as a lock as well: an instance that finds one already minting waits
+// for the result instead of creating a second link, since TorBox throttles a file being pulled
+// through several links at once.
 const urlInFlight = {};
+const LOCK_WAIT_MS = 2500;
+
 async function resolveUrlOnce(cacheKey, resolve){
   const cached = await cache.get(cacheKey);
   if(cached)return cached;
   if(!urlInFlight[cacheKey]){
     urlInFlight[cacheKey] = (async () => {
-      const url = await resolve();
-      if(url)await cache.set(cacheKey, url, {ttl: 3600});
-      return url;
+      const lockKey = `${cacheKey}:lock`;
+      // Atomic claim: exactly one instance wins, the rest wait for its result instead of minting a
+      // second link. A plain get-then-set would let every instance pass the check together.
+      if(!await setIfAbsent(lockKey, 1, 30)){
+        const deadline = Date.now() + LOCK_WAIT_MS;
+        while(Date.now() < deadline){
+          await wait(100);
+          const url = await cache.get(cacheKey);
+          if(url)return url;
+        }
+      }
+      try {
+        const raced = await cache.get(cacheKey); // the winner may have finished while we waited
+        if(raced)return raced;
+        const url = await resolve();
+        if(url)await cache.set(cacheKey, url, {ttl: 3600});
+        return url;
+      }finally{
+        await cache.del(lockKey).catch(() => {});
+      }
     })().finally(() => { delete urlInFlight[cacheKey]; });
   }
   return urlInFlight[cacheKey];
@@ -159,18 +183,27 @@ async function resolveUrlOnce(cacheKey, resolve){
 //
 // Tunable with STREAM_REDIRECT_GAP_MS (0 disables). Waiting is capped so a request is never held
 // for long: past the cap we redirect anyway rather than stall playback.
+// The slot lives in the shared cache, not in memory: a burst is spread across several serverless
+// instances, and per-instance pacing would let each of them fire at the same moment.
 const REDIRECT_GAP_MS = parseInt(process.env.STREAM_REDIRECT_GAP_MS || 300);
 const MAX_PACING_WAIT_MS = 3000;
-const redirectSlot = {};
 
 async function paceRedirect(key){
   if(!(REDIRECT_GAP_MS > 0))return 0;
+  const slotKey = `torbox:pace:${key}`;
   const now = Date.now();
-  const slot = Math.max(now, (redirectSlot[key] || 0) + REDIRECT_GAP_MS);
+  // Seed the queue at "now" so the counter holds timestamps rather than starting from zero; only
+  // the first caller wins the seed, the rest just increment.
+  await setIfAbsent(slotKey, now, 60);
+  // Atomically reserve the next slot. Incrementing hands every caller a distinct value, so
+  // concurrent instances queue up instead of all reading the same timestamp and firing together.
+  let slot = await incrementBy(slotKey, REDIRECT_GAP_MS, 60);
+  if(slot < now){
+    // Left over from an earlier burst — restart the queue from now.
+    await cache.set(slotKey, now, {ttl: 60});
+    slot = await incrementBy(slotKey, REDIRECT_GAP_MS, 60);
+  }
   const delay = Math.min(slot - now, MAX_PACING_WAIT_MS);
-  redirectSlot[key] = slot;
-  // Drop slots that are already in the past so this map can't grow unbounded.
-  for(const [k, v] of Object.entries(redirectSlot))if(v < now - 60000)delete redirectSlot[k];
   if(delay > 0)await wait(delay);
   return delay;
 }

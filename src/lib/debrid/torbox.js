@@ -10,6 +10,9 @@ import {isVideo, wait} from '../util.js';
 // Kept short so deletes and new downloads still surface quickly; invalidated explicitly on delete.
 const MYLIST_TTL = 15;
 
+// Sent on every TorBox API call so requests are identifiable rather than an anonymous runtime agent.
+const USER_AGENT = 'jackettio-torbox (+https://github.com/Krasav4k1/jackettio-torbox)';
+
 // A file name that looks like a TV episode (SxxExx or NxNN). Used to detect series downloads by
 // their contents, not just the top-level name (a season pack often has no SxxExx in its title).
 const EPISODE_FILE_RE = /s\d{1,2}[ ._-]*e\d{1,3}|\b\d{1,2}x\d{2}\b/i;
@@ -307,7 +310,9 @@ export default class TorBox {
       method,
       headers: Object.assign({
         'accept': 'application/json',
-        'authorization': `Bearer ${this.#apiKey}`
+        'authorization': `Bearer ${this.#apiKey}`,
+        // Identify ourselves rather than sending the runtime's default agent.
+        'user-agent': USER_AGENT
       }, opts.headers || {}),
       query: opts.query || {}
     });

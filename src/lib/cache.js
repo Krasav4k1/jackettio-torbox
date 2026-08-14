@@ -31,7 +31,10 @@ if(restUrl && restToken){
     async get(key){ const value = await client.get(key); return value === null || value === undefined ? undefined : value; },
     async set(key, value, opts){ const ttl = opts && opts.ttl; return ttl ? client.set(key, value, {ex: ttl}) : client.set(key, value); },
     async del(key){ return client.del(key); },
-    async flushdb(){ return client.flushdb(); }
+    async flushdb(){ return client.flushdb(); },
+    // Atomic primitives used to coordinate across serverless instances.
+    async setnx(key, value, ttl){ return (await client.set(key, value, {nx: true, ex: ttl})) === 'OK'; },
+    async incrby(key, amount, ttl){ const value = await client.incrby(key, amount); if(ttl)await client.expire(key, ttl); return value; }
   };
   storeName = 'upstash-rest';
   console.log('Cache store: upstash-rest');
@@ -48,6 +51,8 @@ if(restUrl && restToken){
     const value = await rawGet(...args);
     return value === null ? undefined : value;
   };
+  cache.setnx = async (key, value, ttl) => (await client.set(key, JSON.stringify(value), 'EX', ttl, 'NX')) === 'OK';
+  cache.incrby = async (key, amount, ttl) => { const value = await client.incrby(key, amount); if(ttl)await client.expire(key, ttl); return value; };
   storeName = 'redis';
   console.log('Cache store: redis');
 }else if(useMemoryStore){
@@ -71,6 +76,23 @@ export default cache;
 export async function flush(){
   if(typeof cache.flushdb === 'function')return cache.flushdb();
   if(typeof cache.reset === 'function')return cache.reset();
+}
+
+// Claim a key only if it doesn't already exist. Atomic on Upstash/Redis; on the single-process
+// stores (memory/sqlite) the emulation is enough, since there are no other instances to race with.
+export async function setIfAbsent(key, value, ttl){
+  if(typeof cache.setnx === 'function')return cache.setnx(key, value, ttl);
+  if(await cache.get(key) !== undefined)return false;
+  await cache.set(key, value, {ttl});
+  return true;
+}
+
+// Add to a counter and return the new value, for reserving a slot without a read-then-write race.
+export async function incrementBy(key, amount, ttl){
+  if(typeof cache.incrby === 'function')return cache.incrby(key, amount, ttl);
+  const value = (parseInt(await cache.get(key)) || 0) + amount;
+  await cache.set(key, value, {ttl});
+  return value;
 }
 
 export async function clean(){
