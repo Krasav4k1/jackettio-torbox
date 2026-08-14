@@ -147,7 +147,11 @@ const LOCK_WAIT_MS = 2500;
 
 async function resolveUrlOnce(cacheKey, resolve){
   const cached = await cache.get(cacheKey);
-  if(cached)return cached;
+  if(cached){
+    if(await cachedLinkUsable(cacheKey, cached))return cached;
+    // TorBox is refusing it — drop it and fall through to mint (and warm) a fresh one.
+    await cache.del(cacheKey).catch(() => {});
+  }
   if(!urlInFlight[cacheKey]){
     urlInFlight[cacheKey] = (async () => {
       const lockKey = `${cacheKey}:lock`;
@@ -221,6 +225,20 @@ async function probeStatus(url){
   }catch(err){
     return 0; // network hiccup — treat as inconclusive, never block playback
   }
+}
+
+// A cached link can stop working well before its TTL — TorBox refuses links it no longer wants to
+// serve. Without this check we replay a dead link for the whole hour, which is why a title could
+// fail repeatedly and then "fix itself" once the cache expired. Re-checked at most every couple of
+// minutes per file, so it costs nothing on the hot path.
+async function cachedLinkUsable(cacheKey, url){
+  if(!config.warmLinks)return true;
+  const marker = `${cacheKey}:checked`;
+  if(await cache.get(marker))return true;
+  await cache.set(marker, 1, {ttl: 120});
+  if(await probeStatus(url) !== 429)return true;
+  console.log('cached TorBox link refused (429) — dropping it and minting a fresh one');
+  return false;
 }
 
 // Wait until TorBox will actually serve a freshly minted link. A file inside a large pack can be
