@@ -151,6 +151,30 @@ async function resolveUrlOnce(cacheKey, resolve){
   return urlInFlight[cacheKey];
 }
 
+// TorBox rate-limits requests to its download endpoints per account ("Too many requests, retry in
+// 0s") and recommends at most 4 simultaneous connections to a link. Players don't honour that: the
+// logs show a player opening 7 connections within 113ms, each following our redirect straight to
+// TorBox. We can't limit the player directly, but every one of those connections asks us for the
+// redirect first — so spacing our replies staggers how fast it can reach TorBox.
+//
+// Tunable with STREAM_REDIRECT_GAP_MS (0 disables). Waiting is capped so a request is never held
+// for long: past the cap we redirect anyway rather than stall playback.
+const REDIRECT_GAP_MS = parseInt(process.env.STREAM_REDIRECT_GAP_MS || 300);
+const MAX_PACING_WAIT_MS = 3000;
+const redirectSlot = {};
+
+async function paceRedirect(key){
+  if(!(REDIRECT_GAP_MS > 0))return 0;
+  const now = Date.now();
+  const slot = Math.max(now, (redirectSlot[key] || 0) + REDIRECT_GAP_MS);
+  const delay = Math.min(slot - now, MAX_PACING_WAIT_MS);
+  redirectSlot[key] = slot;
+  // Drop slots that are already in the past so this map can't grow unbounded.
+  for(const [k, v] of Object.entries(redirectSlot))if(v < now - 60000)delete redirectSlot[k];
+  if(delay > 0)await wait(delay);
+  return delay;
+}
+
 // Probe a link we're about to serve, at most once every couple of minutes per file, so a link that
 // TorBox is refusing shows up in the log (and gets evicted) instead of failing silently in the
 // player. Cached links need this too — a session minutes later reuses one we never re-checked.
@@ -1261,6 +1285,8 @@ app.use('/:userConfig/torbox/play/:torrentId/:fileId/:name?', async(req, res, ne
       return debridInstance.getDownload({id: `${req.params.torrentId}:${req.params.fileId}`});
     });
     await maybeProbe(url, urlCacheKey);
+    // Stagger concurrent connections so the player can't exceed TorBox's request rate.
+    await paceRedirect(`play:${await debridInstance.getUserHash()}`);
 
     // Let the player reuse this redirect instead of re-invoking us for every range request.
     res.set('Cache-Control', 'private, max-age=300');

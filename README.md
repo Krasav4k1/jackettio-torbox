@@ -152,6 +152,21 @@ The addon auto-detects, in priority order:
 Works on any host (Vercel, Docker, local). After adding the integration, **redeploy** and check
 the deployment's Runtime Logs for `Cache store: upstash-rest` (or `redis`) to confirm it's active.
 
+#### Playback and TorBox rate limits
+
+TorBox rate-limits requests to its download endpoints per account (`Too many requests, retry in 0s`)
+and recommends **at most 4 simultaneous connections** to a download link. Players routinely exceed
+that — a TV player opening 7 connections in ~100ms is enough to trip it, which surfaces in Stremio
+as *"The stream source responded with (HTTP 429)"*.
+
+Every one of those connections asks the addon for a redirect first, so the addon spaces its replies
+(default 300ms apart) to keep the fan-out under TorBox's limit. Tune with `STREAM_REDIRECT_GAP_MS`
+— raise it if 429s persist, lower it to start playback sooner, `0` disables pacing entirely.
+
+`PROBE_LINKS=true` additionally logs the HTTP status TorBox returns for a freshly resolved link,
+which is useful for diagnosing playback failures (it's off by default because the probe comes from
+the server rather than the player).
+
 #### Automatic clearing on deploy
 
 The first request after a **new version** is deployed clears the cache automatically, so entries
