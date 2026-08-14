@@ -15,6 +15,13 @@ export default {
   // Optional in their API; set TORBOX_SEND_USER_IP=false to omit it (worth trying on a carrier-NAT
   // mobile connection, where the address is shared and can rotate mid-session).
   torboxSendUserIp: (process.env.TORBOX_SEND_USER_IP || 'true') === 'true',
+  // Before handing a freshly minted link to the player, check TorBox will actually serve it and
+  // retry while it answers 429. A file inside a large pack can need a moment before TorBox serves
+  // it — the symptom is a title that fails a few times and then plays. Doing the retries here turns
+  // that into a slower first start instead of a playback error. WARM_LINKS=false disables it.
+  warmLinks: (process.env.WARM_LINKS || 'true') === 'true',
+  // How long to keep retrying a link TorBox is not serving yet, in milliseconds.
+  warmLinkBudgetMs: parseInt(process.env.WARM_LINK_BUDGET_MS || 6000),
   // Jacket instance url
   jackettUrl: process.env.JACKETT_URL || 'http://localhost:9117',
   // Jacket API key

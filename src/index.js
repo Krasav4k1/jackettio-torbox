@@ -165,7 +165,12 @@ async function resolveUrlOnce(cacheKey, resolve){
         const raced = await cache.get(cacheKey); // the winner may have finished while we waited
         if(raced)return raced;
         const url = await resolve();
-        if(url)await cache.set(cacheKey, url, {ttl: 3600});
+        if(url){
+          // Only the instance that minted it waits for TorBox to start serving it; everyone else
+          // gets the cached link afterwards, so this cost is paid once per file.
+          await warmLink(url);
+          await cache.set(cacheKey, url, {ttl: 3600});
+        }
         return url;
       }finally{
         await cache.del(lockKey).catch(() => {});
@@ -206,6 +211,36 @@ async function paceRedirect(key){
   const delay = Math.min(slot - now, MAX_PACING_WAIT_MS);
   if(delay > 0)await wait(delay);
   return delay;
+}
+
+// Ask TorBox for the first bytes of a link and return the status, without reading the body.
+async function probeStatus(url){
+  try {
+    const res = await promiseTimeout(fetch(url, {method: 'GET', headers: {range: 'bytes=0-1'}}), 2500);
+    return res.status;
+  }catch(err){
+    return 0; // network hiccup — treat as inconclusive, never block playback
+  }
+}
+
+// Wait until TorBox will actually serve a freshly minted link. A file inside a large pack can be
+// refused with 429 for a few seconds before it becomes servable, which is why such a title "fails a
+// few times and then works": those retries happen here now, so the player gets a link that works.
+async function warmLink(url){
+  if(!config.warmLinks)return true;
+  const deadline = Date.now() + config.warmLinkBudgetMs;
+  for(let attempt = 0; ; attempt++){
+    const status = await probeStatus(url);
+    if(status !== 429){
+      if(attempt > 0)console.log(`TorBox link ready after ${attempt} retr${attempt === 1 ? 'y' : 'ies'} (status ${status})`);
+      return true;
+    }
+    if(Date.now() >= deadline){
+      console.log(`TorBox still answering 429 after ${config.warmLinkBudgetMs}ms — serving the link anyway`);
+      return false;
+    }
+    await wait(Math.min(500 * (attempt + 1), 1500));
+  }
 }
 
 // Content type for a video file, from its extension. Used to answer a player's HEAD probe locally.
