@@ -5,7 +5,7 @@ import localtunnel from 'localtunnel';
 import { rateLimit } from 'express-rate-limit';
 import {readFileSync} from "fs";
 import config from './lib/config.js';
-import cache, {vacuum as vacuumCache, clean as cleanCache} from './lib/cache.js';
+import cache, {vacuum as vacuumCache, clean as cleanCache, flush as flushCache, storeName as cacheStoreName} from './lib/cache.js';
 import path from 'path';
 import * as meta from './lib/meta.js';
 import * as rating from './lib/rating.js';
@@ -248,6 +248,41 @@ async function buildDeleteStreams(req, userConfig, debridInstance, showName){
       };
     });
 }
+
+// Clear the cache the first time a newly deployed version runs. Cached entries are written in the
+// shape the code expected at the time, so an upgrade can leave behind values the new code reads
+// differently — this makes every deploy start from a clean slate instead of needing a manual flush.
+//
+// Keyed on the addon version by default; set CACHE_BUST_KEY (e.g. to VERCEL_DEPLOYMENT_ID or a git
+// sha) to bust on every deploy rather than only on a version change. The marker is written *after*
+// the flush, because flushing would otherwise delete it and we'd flush on every cold start.
+const CACHE_BUST_MARKER = 'deploy:cacheBust';
+
+async function bustCacheOnNewVersion(){
+  // The memory store is per-instance and already empty on a cold start — nothing stale to clear.
+  if(cacheStoreName === 'memory')return false;
+  const current = `${process.env.CACHE_BUST_KEY || addon.version}`;
+  const seen = await cache.get(CACHE_BUST_MARKER);
+  if(seen === current)return false;
+  await flushCache();
+  await cache.set(CACHE_BUST_MARKER, current, {ttl: 90 * 24 * 3600});
+  console.log(`Cache cleared for version ${current} (previous: ${seen || 'none'})`);
+  return true;
+}
+
+// Run once per cold start, on the first request rather than at import: a serverless instance can be
+// frozen right after responding, so work started at import time isn't guaranteed to finish. The
+// promise is memoized, so this costs one cache read per instance — and only flushes on a new version.
+let cacheBustPromise = null;
+app.use((req, res, next) => {
+  if(!cacheBustPromise){
+    cacheBustPromise = bustCacheOnNewVersion().catch(err => {
+      console.log(`cache bust failed: ${err.message || err}`);
+      return false;
+    });
+  }
+  cacheBustPromise.then(() => next(), () => next());
+});
 
 // Time budget for the whole /stream request. Vercel Hobby kills the function at 10s, so we aim to
 // finish well under that: resolve private-source hashes sequentially (with a cooldown between

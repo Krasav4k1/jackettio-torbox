@@ -152,6 +152,20 @@ The addon auto-detects, in priority order:
 Works on any host (Vercel, Docker, local). After adding the integration, **redeploy** and check
 the deployment's Runtime Logs for `Cache store: upstash-rest` (or `redis`) to confirm it's active.
 
+#### Automatic clearing on deploy
+
+The first request after a **new version** is deployed clears the cache automatically, so entries
+written by an older version (whose shape may differ) can't linger. It runs once per version — a
+redeploy of the same version keeps the cache — and only applies to a persistent store (the
+in-memory one is already empty on every cold start). Look for this in the Runtime Logs:
+
+```
+Cache cleared for version 1.7.24 (previous: 1.7.23)
+```
+
+Set `CACHE_BUST_KEY` to bust on *every* deploy instead of only on a version change — e.g.
+`CACHE_BUST_KEY=$VERCEL_DEPLOYMENT_ID` (or a git sha) in the Vercel project's environment variables.
+
 #### Inspecting and clearing the cache
 
 Everything the addon stores is a cache with a TTL, so clearing it is always safe — it refills on

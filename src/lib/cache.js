@@ -18,6 +18,9 @@ const useMemoryStore = !restUrl && !redisUrl && (!!process.env.VERCEL || process
 
 let db = null;
 let cache;
+// Which store won the selection above. Callers use this to skip work that only makes sense for a
+// shared, persistent store (the memory store starts empty on every cold start).
+export let storeName = 'sqlite';
 
 if(restUrl && restToken){
   const {Redis} = await import('@upstash/redis');
@@ -27,8 +30,10 @@ if(restUrl && restToken){
   cache = {
     async get(key){ const value = await client.get(key); return value === null || value === undefined ? undefined : value; },
     async set(key, value, opts){ const ttl = opts && opts.ttl; return ttl ? client.set(key, value, {ex: ttl}) : client.set(key, value); },
-    async del(key){ return client.del(key); }
+    async del(key){ return client.del(key); },
+    async flushdb(){ return client.flushdb(); }
   };
+  storeName = 'upstash-rest';
   console.log('Cache store: upstash-rest');
 }else if(redisUrl){
   const Redis = (await import('ioredis')).default;
@@ -43,9 +48,11 @@ if(restUrl && restToken){
     const value = await rawGet(...args);
     return value === null ? undefined : value;
   };
+  storeName = 'redis';
   console.log('Cache store: redis');
 }else if(useMemoryStore){
   cache = await cacheManager.caching({store: 'memory', max: 5000, ttl: 86400});
+  storeName = 'memory';
 }else{
   const sqlite3 = (await import('sqlite3')).default;
   const sqliteStore = (await import('cache-manager-sqlite')).default;
@@ -58,6 +65,13 @@ if(restUrl && restToken){
 }
 
 export default cache;
+
+// Delete every key. Used to drop entries written by a previous version of the addon, whose shape
+// may no longer match what the current code expects.
+export async function flush(){
+  if(typeof cache.flushdb === 'function')return cache.flushdb();
+  if(typeof cache.reset === 'function')return cache.reset();
+}
 
 export async function clean(){
   // https://github.com/maxpert/node-cache-manager-sqlite/blob/36a1fe44a30b6af8d8c323c59e09fe81bde539d9/index.js#L146
