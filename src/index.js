@@ -17,6 +17,7 @@ import * as jackettio from "./lib/jackettio.js";
 import {cleanTorrentFolder, createTorrentFolder, get as getTorrentInfos, getTorrentFile} from './lib/torrentInfos.js';
 import {bytesToSize, numberPad, promiseTimeout, wait, formatDateTime, parseQuality} from './lib/util.js';
 import {generatePoster, generatePosterSvg} from './lib/poster.js';
+import {applyMediaflowProxyIfNeeded} from './lib/mediaflowProxy.js';
 import pLimit from 'p-limit';
 
 const converter = new showdown.Converter();
@@ -1335,7 +1336,7 @@ app.use('/:userConfig/torbox/resolve/:id/:name?', async(req, res, next) => {
 
     res.set('Cache-Control', 'private, max-age=300');
     res.status(302);
-    res.set('location', url);
+    res.set('location', applyMediaflowProxyIfNeeded(url, userConfig));
     res.send('');
 
   }catch(err){
@@ -1399,7 +1400,9 @@ app.use('/:userConfig/torbox/play/:torrentId/:fileId/:name?', async(req, res, ne
     // Hand the player TorBox's own permalink so each of its parallel connections gets its own CDN
     // link. Sharing one resolved link across them is what TorBox refuses with 429, and it needs no
     // API call, cache, warm-up or pacing from us.
-    if(config.torboxPermalink && typeof debridInstance.getDownloadPermalink === 'function'){
+    // Skipped when MediaFlow is configured: the proxy is the only thing that talks to TorBox then,
+    // so it wants one real CDN link, and the player's connections never reach TorBox at all.
+    if(config.torboxPermalink && !userConfig.enableMediaFlow && typeof debridInstance.getDownloadPermalink === 'function'){
       const permalink = debridInstance.getDownloadPermalink({id: `${req.params.torrentId}:${req.params.fileId}`});
       res.status(302);
       res.set('location', permalink);
@@ -1416,6 +1419,18 @@ app.use('/:userConfig/torbox/play/:torrentId/:fileId/:name?', async(req, res, ne
       return debridInstance.getDownload({id: `${req.params.torrentId}:${req.params.fileId}`});
     });
     await maybeProbe(url, urlCacheKey);
+
+    // Route through MediaFlow when configured: it holds a single connection to TorBox and serves the
+    // player's many parallel connections itself, which is what keeps a player's fan-out from
+    // reaching TorBox's per-link limits.
+    if(userConfig.enableMediaFlow){
+      const proxied = applyMediaflowProxyIfNeeded(url, userConfig);
+      res.set('Cache-Control', 'private, max-age=300');
+      res.status(302);
+      res.set('location', proxied);
+      return res.send('');
+    }
+
     // Stagger concurrent connections so the player can't exceed TorBox's request rate.
     await paceRedirect(`play:${await debridInstance.getUserHash()}`);
 
