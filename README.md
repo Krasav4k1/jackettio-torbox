@@ -152,6 +152,34 @@ The addon auto-detects, in priority order:
 Works on any host (Vercel, Docker, local). After adding the integration, **redeploy** and check
 the deployment's Runtime Logs for `Cache store: upstash-rest` (or `redis`) to confirm it's active.
 
+#### MediaFlow proxy (fixes playback 429s)
+
+Stremio opens many parallel connections for a single play
+([stremio-bugs#2091](https://github.com/Stremio/stremio-bugs/issues/2091)), and TorBox rate-limits a
+CDN link used by several clients at once — which surfaces as *"The stream source responded with
+(HTTP 429)"*, often on one title while others play fine. The addon mitigates this, but the only way
+to remove it is to put a proxy between the player and TorBox: MediaFlow holds a single connection
+upstream and serves the player's connections itself.
+
+**1. Host [MediaFlow Proxy](https://github.com/mhdzumair/mediaflow-proxy).** It streams video, so it
+needs a host without a short function timeout (Vercel is not suitable). Easiest options:
+
+- **Hugging Face Spaces** (free): duplicate an existing `mediaflow-proxy` Space, then in
+  *Settings → Variables and secrets* add a secret named `API_PASSWORD` with a password you choose.
+- **Docker**, anywhere you have a box:
+  ```bash
+  docker run -p 8888:8888 -e API_PASSWORD=your_password mhdzumair/mediaflow-proxy
+  ```
+
+**2. Check it's up:** open `https://<your-mediaflow-host>/docs` (Swagger UI).
+
+**3. Point the addon at it** on the `/configure` page: tick **Enable MediaFlow**, set the proxy URL
+and the same `API_PASSWORD`. The addon reads the proxy's public IP from its `/proxy/ip` endpoint and
+sends that to TorBox for CDN selection, since the proxy — not your device — is what connects.
+
+Streams then resolve to `https://<mediaflow>/proxy/stream?...`, and your player's fan-out never
+reaches TorBox.
+
 #### Playback and TorBox rate limits
 
 TorBox rate-limits requests to its download endpoints per account (`Too many requests, retry in 0s`)

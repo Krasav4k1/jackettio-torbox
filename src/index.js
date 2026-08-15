@@ -17,7 +17,7 @@ import * as jackettio from "./lib/jackettio.js";
 import {cleanTorrentFolder, createTorrentFolder, get as getTorrentInfos, getTorrentFile} from './lib/torrentInfos.js';
 import {bytesToSize, numberPad, promiseTimeout, wait, formatDateTime, parseQuality} from './lib/util.js';
 import {generatePoster, generatePosterSvg} from './lib/poster.js';
-import {applyMediaflowProxyIfNeeded} from './lib/mediaflowProxy.js';
+import {applyMediaflowProxyIfNeeded, updateUserConfigWithMediaFlowIp} from './lib/mediaflowProxy.js';
 import pLimit from 'p-limit';
 
 const converter = new showdown.Converter();
@@ -1300,6 +1300,7 @@ app.use('/:userConfig/torbox/resolve/:id/:name?', async(req, res, next) => {
   try {
 
     const userConfig = Object.assign(JSON.parse(atob(req.params.userConfig)), {ip: req.clientIp});
+    if(userConfig.enableMediaFlow)await updateUserConfigWithMediaFlowIp(userConfig).catch(() => {});
     const debridInstance = debrid.instance(userConfig);
     // The video player re-hits this redirect frequently; resolving adds the torrent to TorBox and
     // requests a link each time. Cache the resolved URL per user+source so repeats are free (and
@@ -1379,6 +1380,9 @@ app.use('/:userConfig/torbox/play/:torrentId/:fileId/:name?', async(req, res, ne
   try {
 
     const userConfig = Object.assign(JSON.parse(atob(req.params.userConfig)), {ip: req.clientIp});
+    // With MediaFlow it is the proxy that fetches from TorBox, so the IP TorBox should see (and pick
+    // a CDN for) is the proxy's, not the viewer's.
+    if(userConfig.enableMediaFlow)await updateUserConfigWithMediaFlowIp(userConfig).catch(() => {});
     const debridInstance = debrid.instance(userConfig);
 
     // Stremio probes with HEAD before playing (see Stremio/stremio-bugs#2091: one play fans out into
