@@ -111,6 +111,18 @@ export default class TorBox {
     return this.#getFilesFromTorrent(res.data.torrent_id);
   }
 
+  // A permalink to TorBox's own requestdl endpoint with redirect=true: TorBox mints a CDN link and
+  // redirects the caller itself. Players open many parallel connections for one file, and TorBox
+  // rate-limits when a single CDN link is used by several clients at once — this way each
+  // connection gets its own link, which is the usage TorBox documents for this endpoint.
+  // No API call from us, so nothing to cache, warm or pace.
+  getDownloadPermalink(file){
+    const [torrentId, fileId] = file.id.split(':');
+    const query = new URLSearchParams({token: this.#apiKey, torrent_id: torrentId, file_id: fileId, redirect: 'true'});
+    if(config.torboxSendUserIp && this.#ip)query.set('user_ip', this.#ip);
+    return `https://api.torbox.app/v1/api/torrents/requestdl?${query.toString()}`;
+  }
+
   async getDownload(file){
 
     const [torrentId, fileId] = file.id.split(':');

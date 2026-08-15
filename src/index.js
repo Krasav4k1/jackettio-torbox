@@ -236,7 +236,16 @@ async function cachedLinkUsable(cacheKey, url){
   const marker = `${cacheKey}:checked`;
   if(await cache.get(marker))return true;
   await cache.set(marker, 1, {ttl: 120});
-  if(await probeStatus(url) !== 429)return true;
+  if(await probeStatus(url) !== 429){
+    await cache.set(`${cacheKey}:served`, 1, {ttl: 3600});
+    return true;
+  }
+  // A link that already served fine is not dead — the 429 is the player's own concurrent load, and
+  // replacing it would only churn links and make TorBox angrier.
+  if(await cache.get(`${cacheKey}:served`)){
+    console.log('cached TorBox link got a 429 but has served before — keeping it (player load)');
+    return true;
+  }
   console.log('cached TorBox link refused (429) — dropping it and minting a fresh one');
   return false;
 }
@@ -1385,6 +1394,16 @@ app.use('/:userConfig/torbox/play/:torrentId/:fileId/:name?', async(req, res, ne
         res.set('Cache-Control', 'private, max-age=300');
         return res.status(200).end();
       }
+    }
+
+    // Hand the player TorBox's own permalink so each of its parallel connections gets its own CDN
+    // link. Sharing one resolved link across them is what TorBox refuses with 429, and it needs no
+    // API call, cache, warm-up or pacing from us.
+    if(config.torboxPermalink && typeof debridInstance.getDownloadPermalink === 'function'){
+      const permalink = debridInstance.getDownloadPermalink({id: `${req.params.torrentId}:${req.params.fileId}`});
+      res.status(302);
+      res.set('location', permalink);
+      return res.send('');
     }
 
     // Cache the resolved link per user+file — the player re-hits this redirect often and each miss
