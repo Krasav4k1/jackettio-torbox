@@ -146,10 +146,10 @@ async function singleAsGroup(id){
 const urlInFlight = {};
 const LOCK_WAIT_MS = 2500;
 
-async function resolveUrlOnce(cacheKey, resolve){
+async function resolveUrlOnce(cacheKey, resolve, noProbe){
   const cached = await cache.get(cacheKey);
   if(cached){
-    if(await cachedLinkUsable(cacheKey, cached))return cached;
+    if(await cachedLinkUsable(cacheKey, cached, noProbe))return cached;
     // TorBox is refusing it — drop it and fall through to mint (and warm) a fresh one.
     await cache.del(cacheKey).catch(() => {});
   }
@@ -173,7 +173,7 @@ async function resolveUrlOnce(cacheKey, resolve){
         if(url){
           // Only the instance that minted it waits for TorBox to start serving it; everyone else
           // gets the cached link afterwards, so this cost is paid once per file.
-          await warmLink(url);
+          if(!noProbe)await warmLink(url);
           await cache.set(cacheKey, url, {ttl: 3600});
         }
         return url;
@@ -232,8 +232,8 @@ async function probeStatus(url){
 // serve. Without this check we replay a dead link for the whole hour, which is why a title could
 // fail repeatedly and then "fix itself" once the cache expired. Re-checked at most every couple of
 // minutes per file, so it costs nothing on the hot path.
-async function cachedLinkUsable(cacheKey, url){
-  if(!config.warmLinks)return true;
+async function cachedLinkUsable(cacheKey, url, skip){
+  if(!config.warmLinks || skip)return true;
   const marker = `${cacheKey}:checked`;
   if(await cache.get(marker))return true;
   await cache.set(marker, 1, {ttl: 120});
@@ -1421,8 +1421,8 @@ app.use('/:userConfig/torbox/play/:torrentId/:fileId/:name?', async(req, res, ne
       // viewer's) is obvious, since that makes TorBox throttle the real player with a 429.
       console.log(`torbox play: new link for ${req.params.torrentId}:${req.params.fileId}, user_ip=${req.clientIp}`);
       return debridInstance.getDownload({id: `${req.params.torrentId}:${req.params.fileId}`});
-    });
-    await maybeProbe(url, urlCacheKey);
+    }, userConfig.enableMediaFlow);
+    if(!userConfig.enableMediaFlow)await maybeProbe(url, urlCacheKey);
 
     // Route through MediaFlow when configured: it holds a single connection to TorBox and serves the
     // player's many parallel connections itself, which is what keeps a player's fan-out from

@@ -24,7 +24,9 @@ export default {
   // retry while it answers 429. A file inside a large pack can need a moment before TorBox serves
   // it — the symptom is a title that fails a few times and then plays. Doing the retries here turns
   // that into a slower first start instead of a playback error. WARM_LINKS=false disables it.
-  warmLinks: (process.env.WARM_LINKS || 'true') === 'true',
+  // Off by default: every probe is itself a connection to the link, and TorBox refuses concurrent
+  // connections to a download — so checking a link competes with the player that is streaming it.
+  warmLinks: (process.env.WARM_LINKS || 'false') === 'true',
   // How long to keep retrying a link TorBox is not serving yet, in milliseconds.
   warmLinkBudgetMs: parseInt(process.env.WARM_LINK_BUDGET_MS || 6000),
   // Jacket instance url
