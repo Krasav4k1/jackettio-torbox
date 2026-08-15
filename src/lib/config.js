@@ -15,11 +15,11 @@ export default {
   // Optional in their API; set TORBOX_SEND_USER_IP=false to omit it (worth trying on a carrier-NAT
   // mobile connection, where the address is shared and can rotate mid-session).
   torboxSendUserIp: (process.env.TORBOX_SEND_USER_IP || 'true') === 'true',
-  // Point the player at TorBox's own requestdl?redirect=true permalink instead of resolving a CDN
-  // link ourselves and handing the same one to every connection. Players fan out into many parallel
-  // connections, and TorBox rate-limits (429) when one CDN link is shared across them; a permalink
-  // gives each connection its own link. TORBOX_PERMALINK=false restores resolving it ourselves.
-  torboxPermalink: (process.env.TORBOX_PERMALINK || 'true') === 'true',
+  // Point the player at TorBox's own requestdl?redirect=true permalink, giving each connection its
+  // own CDN link. Off by default: TorBox refuses concurrent connections to a download regardless of
+  // whether they share a link, so this did not help, and it spends an API call per connection.
+  // TORBOX_PERMALINK=true re-enables it.
+  torboxPermalink: (process.env.TORBOX_PERMALINK || 'false') === 'true',
   // Before handing a freshly minted link to the player, check TorBox will actually serve it and
   // retry while it answers 429. A file inside a large pack can need a moment before TorBox serves
   // it — the symptom is a title that fails a few times and then plays. Doing the retries here turns
